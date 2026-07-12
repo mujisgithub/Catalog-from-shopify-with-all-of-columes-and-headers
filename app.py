@@ -37,7 +37,7 @@ import uuid
 import shutil
 import threading
 
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 
 from catalog_maker import load_products, build_catalogs
@@ -166,7 +166,18 @@ def run_job(job_id, items, job_dir, options):
 # ----------------------------------------------------------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # The page is plain HTML (no template variables), so we serve the file
+    # directly - and we accept it living either in templates/ or right next
+    # to app.py. That makes the site immune to the file landing in the
+    # "wrong" folder during a GitHub upload.
+    for candidate in (os.path.join(BASE_DIR, "templates", "index.html"),
+                      os.path.join(BASE_DIR, "index.html")):
+        if os.path.exists(candidate):
+            with open(candidate, encoding="utf-8") as f:
+                return f.read()
+    return ("<h1>Almost there</h1><p>index.html is missing from the "
+            "deployment. Upload it to your GitHub repository (ideally "
+            "inside the templates folder) and Render will redeploy.</p>"), 500
 
 
 @app.route("/generate", methods=["POST"])
