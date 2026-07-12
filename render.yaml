@@ -1,0 +1,10 @@
+# This file lets Render.com set everything up automatically ("Blueprint").
+# You can also ignore it and click through the dashboard instead - README.md
+# walks you through both ways.
+services:
+  - type: web
+    name: catalogpress
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 300
