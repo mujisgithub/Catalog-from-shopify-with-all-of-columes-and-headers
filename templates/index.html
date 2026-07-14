@@ -131,6 +131,16 @@ input[type=text], select{
 input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; background:#fff}
 .hint{font-size:.82rem; color:var(--muted); margin-top:5px}
 
+/* premium markers + checkbox rows */
+.pro{display:inline-block; background:var(--brass); color:var(--ink);
+  font-family:var(--font-mono); font-size:.6rem; font-weight:500; letter-spacing:.08em;
+  padding:2px 8px; border-radius:999px; vertical-align:2px; margin-left:6px}
+.checkline{display:flex; align-items:center; gap:10px; padding:13px 14px;
+  border:1.5px solid var(--line); border-radius:9px; background:#FBFBFC; cursor:pointer}
+.checkline input{width:18px; height:18px; accent-color:var(--brass); cursor:pointer; flex-shrink:0}
+.checkline span{font-size:.92rem; font-weight:600}
+.checkline small{display:block; font-weight:400; font-size:.8rem; color:var(--muted)}
+
 .drop{
   border:2px dashed var(--line); border-radius:12px; background:#FBFBFC;
   padding:26px; text-align:center; cursor:pointer; transition:border-color .15s, background .15s;
@@ -201,9 +211,10 @@ footer b{color:#fff}
       <p class="kicker">For Shopify stores</p>
       <h1>Your Shopify export, back as a <span class="under">clickable PDF catalog</span> — in minutes.</h1>
       <p class="lede">Upload the product CSV Shopify already gives you. Get back a designed
-        catalog with photos, prices, SKUs and stock — every card linking straight to your store.
-        Need trade pricing? Type <em>0, 10, 20</em> and you'll get three versions,
-        each with the discount already applied.</p>
+        catalog with photos, prices and SKUs — every card linking straight to your store.
+        Need trade pricing? Type <em>0, 10, 20</em> and you'll get three versions
+        with the discount already applied. Premium unlocks category sections,
+        compact layouts, compare-at pricing and stock counts.</p>
       <div class="hero-cta">
         <a class="btn brass" href="#generate">Make my catalog</a>
         <span class="hero-note">No signup · your file is deleted after 2 hours</span>
@@ -259,12 +270,12 @@ footer b{color:#fff}
             <div class="field">
               <label for="bizName">Business name</label>
               <input type="text" id="bizName" name="business_name" maxlength="60"
-                     placeholder="Darussalam UK" required>
+                     placeholder="Your Business Name" required>
               <p class="hint">Shown on the cover and page headers.</p>
             </div>
             <div class="field">
               <label for="storeUrl">Store URL <small>(makes every card clickable)</small></label>
-              <input type="text" id="storeUrl" name="store_url" placeholder="https://darussalam.uk">
+              <input type="text" id="storeUrl" name="store_url" placeholder="https://Your Website Link">
               <p class="hint">Leave empty if you don't want links.</p>
             </div>
           </div>
@@ -272,8 +283,8 @@ footer b{color:#fff}
           <div class="grid2">
             <div class="field">
               <label for="discounts">Discount versions <small>(%)</small></label>
-              <input type="text" id="discounts" name="discounts" value="0, 10, 20">
-              <p class="hint">One PDF per number. “0” = full-price version. Old prices show crossed out.</p>
+              <input type="text" id="discounts" name="discounts" value="" placeholder="e.g. 0, 10, 20">
+              <p class="hint">One PDF per number. “0” = full-price version. Old prices show crossed out. Leave blank for a single full-price catalog.</p>
             </div>
             <div class="field">
               <label for="currency">Currency</label>
@@ -282,6 +293,41 @@ footer b{color:#fff}
                 <option value="$">$ Dollar</option>
                 <option value="€">€ Euro</option>
               </select>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label for="sections">Category sections <span class="pro">PRO</span></label>
+              <input type="text" id="sections" name="sections" placeholder="e.g. Seerah, Quran, Kids">
+              <p class="hint">Each name becomes a divider page. Products are matched by their
+                 Shopify tags, in your order; the rest go under “More Products”. Leave blank for none.</p>
+            </div>
+            <div class="field">
+              <label for="layout">Products per page</label>
+              <select id="layout" name="layout">
+                <option value="12" selected>12 — Standard</option>
+                <option value="20">20 — Compact (PRO)</option>
+                <option value="30">30 — Dense price list (PRO)</option>
+              </select>
+              <p class="hint">Compact layouts fit big ranges into fewer pages.</p>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label class="checkline" for="compareAt">
+                <input type="checkbox" id="compareAt" name="compare_at">
+                <span>Show compare-at prices <span class="pro">PRO</span>
+                  <small>Your store's “was” price appears crossed out above the price badge.</small></span>
+              </label>
+            </div>
+            <div class="field">
+              <label class="checkline" for="showStock">
+                <input type="checkbox" id="showStock" name="show_stock">
+                <span>Show stock counts <span class="pro">PRO</span>
+                  <small>Adds “12 in stock” to each card that has inventory.</small></span>
+              </label>
             </div>
           </div>
 
@@ -332,14 +378,14 @@ footer b{color:#fff}
     <div class="notes-grid">
       <div class="note">
         <h3>What ends up on each card?</h3>
-        <p>Product photo, title, SKU, stock count and a price badge. With a discount,
-           the original price appears crossed out above the new one.</p>
+        <p>Product photo, title, SKU and a price badge — every card linking to
+           your store. Discount versions show the old price crossed out.</p>
       </div>
       <div class="note">
-        <h3>Which products are included?</h3>
-        <p>One card per product — any row with a title and a price. SKU and
-           stock counts appear when your export includes them, and duplicates
-           are removed automatically.</p>
+        <h3>What does Premium add?</h3>
+        <p>Category divider pages built from your Shopify tags, compact 20 or
+           30-per-page layouts, crossed-out compare-at prices, and stock
+           counts on every card.</p>
       </div>
       <div class="note">
         <h3>Is my data stored?</h3>
