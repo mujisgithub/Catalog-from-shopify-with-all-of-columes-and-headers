@@ -1,23 +1,23 @@
 """
 catalog_maker.py
 ================
-This is the "engine" of the website. It takes a Shopify product CSV and
-turns it into one or more PDF catalogs (one per discount level).
+The "engine" of the website: takes a Shopify product CSV and turns it
+into one or more PDF catalogs (one per discount level).
 
-It is your original script, reorganised into functions so the website
-(app.py) can call it, plus these upgrades:
+FREE features:
+  - designed product cards (photo, title, SKU, price badge), all clickable
+  - discount versions with the old price crossed out
+  - accepts every Shopify export flavour (old/new headers, no header,
+    semicolons, odd encodings - only a title and a price are required)
 
-  1. DISCOUNTS  - pass a list like [0, 10, 20] and you get one PDF per
-                  level. Discounted cards show the old price crossed out.
-  2. SPEED      - product images download 12 at a time instead of 1 at a
-                  time, and are downloaded ONCE even if you make 3 PDFs.
-  3. PROGRESS   - reports "Downloading images 40/120..." back to the
-                  browser so customers see a live progress bar.
-  4. SAFETY     - only downloads real public image URLs, never crashes
-                  the whole job because one image failed.
+PREMIUM features (switched on per-request by app.py):
+  - category SECTIONS: merchant types section names, products are grouped
+    by their Shopify tags under divider pages, in the merchant's order
+  - compact LAYOUTS: 20 or 30 products per page instead of 12
+  - COMPARE-AT prices: the store's own "was" price shown crossed out
+  - STOCK counts on each card
 
-You should not need to touch app.py to change how the PDF LOOKS -
-all the design knobs are in the SETTINGS block right below.
+All the visual design knobs live in the SETTINGS block below.
 """
 
 import os
@@ -41,14 +41,15 @@ from reportlab.lib.utils import ImageReader
 # =========================================================
 # SETTINGS - tweak the look of every catalog here
 # =========================================================
-COLUMNS = 3                 # product cards per row
-ROWS = 4                    # rows per page  (3 x 4 = 12 products/page)
+# Page layouts. "scale" shrinks fonts/paddings so smaller cards stay tidy.
+LAYOUTS = {
+    "12": {"cols": 3, "rows": 4, "scale": 1.00, "gutter_mm": 5, "img_ratio": 0.50},
+    "20": {"cols": 4, "rows": 5, "scale": 0.82, "gutter_mm": 4, "img_ratio": 0.48},
+    "30": {"cols": 5, "rows": 6, "scale": 0.70, "gutter_mm": 3, "img_ratio": 0.44},
+}
 
-IMAGE_AREA_RATIO = 0.50     # top half of each card is the photo
 IMAGE_PADDING_MM = 2.5
-
 PAGE_MARGIN_MM = 10
-GUTTER_MM = 5
 
 TITLE_FONT = "Helvetica-Bold"
 TITLE_FONT_SIZE = 8.5
@@ -91,18 +92,23 @@ DOWNLOAD_TIMEOUT = 20       # seconds before giving up on one image
 
 # Shopify has exported products under several different column names over
 # the years (and some files arrive with no header row at all). We accept
-# them all. Only a TITLE and a PRICE are truly required - SKU, stock and
-# images are shown when present and quietly skipped when not.
+# them all. Only a TITLE and a PRICE are truly required - SKU, stock,
+# images, tags and compare-at prices are used when present.
 HEADER_SYNONYMS = {
-    "title":  ["title", "product title", "name", "product name"],
-    "handle": ["handle", "url handle", "product handle"],
-    "sku":    ["variant sku", "sku"],
-    "qty":    ["variant inventory qty", "inventory quantity", "inventory qty",
-               "variant inventory quantity", "available", "on hand",
-               "stock", "quantity"],
-    "price":  ["variant price", "price"],
-    "image":  ["image src", "product image url", "image url", "featured image",
-               "image link", "image", "variant image url", "variant image"],
+    "title":    ["title", "product title", "name", "product name"],
+    "handle":   ["handle", "url handle", "product handle"],
+    "sku":      ["variant sku", "sku"],
+    "qty":      ["variant inventory qty", "inventory quantity", "inventory qty",
+                 "variant inventory quantity", "available", "on hand",
+                 "stock", "quantity"],
+    "price":    ["variant price", "price"],
+    "image":    ["image src", "product image url", "image url", "featured image",
+                 "image link", "image", "variant image url", "variant image"],
+    "compare":  ["variant compare at price", "compare-at price",
+                 "compare at price", "compare at"],
+    "tags":     ["tags", "product tags"],
+    "category": ["product category", "category"],
+    "type":     ["type", "product type"],
 }
 
 # Values that only ever appear in specific Shopify columns - we use these
@@ -169,12 +175,9 @@ def product_url(store_domain, handle):
 _host_check_cache = {}
 
 def is_safe_image_url(url):
-    """
-    Only allow normal public http/https image links.
-    Blocks links that point at private/internal network addresses
-    (a standard safety measure for any website that downloads URLs
-    supplied inside an uploaded file).
-    """
+    """Only allow normal public http/https image links. Blocks links that
+    point at private/internal network addresses (a standard safety measure
+    for any website that downloads URLs supplied inside an uploaded file)."""
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -217,11 +220,9 @@ def download_image(url):
 
 
 def predownload_images(items, cache_dir, progress=None):
-    """
-    Download every product photo BEFORE drawing any PDF.
+    """Download every product photo BEFORE drawing any PDF.
     Runs 12 downloads at once, so 200 photos take seconds not minutes.
-    Each item gets item["img_path"] = local file (or None if it failed).
-    """
+    Each item gets item["img_path"] = local file (or None if it failed)."""
     os.makedirs(cache_dir, exist_ok=True)
 
     def fetch_one(item):
@@ -256,15 +257,6 @@ def predownload_images(items, cache_dir, progress=None):
 # =========================================================
 # Reading the Shopify CSV - accepts every export variation
 # =========================================================
-#
-# Real customer files arrive in four flavours and we handle all of them:
-#   1. Old Shopify format ("Handle", "Variant SKU", "Variant Price", ...)
-#   2. New Shopify format ("URL handle", "SKU", "Price", ...)
-#   3. Files with NO header row at all (found by content "anchors":
-#      the inventory-policy column only ever contains deny/continue,
-#      which pins down where price, SKU etc. live around it)
-#   4. Odd delimiters (semicolons, tabs) and encodings (Excel exports)
-
 def _norm(name):
     """'  Variant_Price ' -> 'variant price' for header comparison."""
     s = str(name).replace("\ufeff", "").replace("_", " ").strip().lower()
@@ -338,7 +330,7 @@ def _map_from_header(header_cells):
     if "price" not in colmap:
         for i, c in enumerate(normed):
             if c.startswith("price") and "compare" not in c:
-                colmap[field := "price"] = i
+                colmap["price"] = i
                 break
     if "qty" not in colmap:
         for i, c in enumerate(normed):
@@ -353,14 +345,16 @@ def _map_from_header(header_cells):
 def _map_from_anchors(df):
     """No header row: locate columns by their tell-tale CONTENT.
     Shopify's inventory-policy column only ever says deny/continue -
-    from there, fulfillment comes next, then price. SKU sits two or
-    three columns to the left, images are the first http column."""
+    from there, fulfillment comes next, then price, then compare-at.
+    SKU sits two or three columns to the left; images are the first
+    http column; tags/category sit at Shopify's fixed early positions."""
     ncols = len(df.columns)
     sample = df.head(200)
 
     def nonempty(col):
-        vals = [v.strip() for v in sample[col].tolist() if str(v).strip()]
-        return vals
+        if col < 0 or col >= ncols:
+            return []
+        return [v.strip() for v in sample[col].tolist() if str(v).strip()]
 
     policy_col = None
     for c in range(ncols):
@@ -372,6 +366,13 @@ def _map_from_anchors(df):
         return None
 
     colmap = {"handle": 0, "title": 1}
+    # Shopify's fixed early columns in every product export:
+    if ncols > 4:
+        colmap["category"] = 4
+    if ncols > 5:
+        colmap["type"] = 5
+    if ncols > 6:
+        colmap["tags"] = 6
 
     # Column just left of policy: either the qty numbers, or the tracker
     left = {v.lower() for v in nonempty(policy_col - 1)}
@@ -397,6 +398,12 @@ def _map_from_anchors(df):
     if "price" not in colmap:
         return None
 
+    # Compare-at price sits immediately after the price column
+    cmp_vals = nonempty(colmap["price"] + 1)
+    if not cmp_vals or sum(parse_price(v) is not None
+                           for v in cmp_vals) >= 0.7 * len(cmp_vals):
+        colmap["compare"] = colmap["price"] + 1
+
     # Image: first column that mostly holds picture links
     for c in range(ncols):
         vals = nonempty(c)
@@ -413,11 +420,8 @@ def _map_from_anchors(df):
 
 
 def load_products(csv_path, store_domain):
-    """
-    Reads ANY Shopify product export and returns one entry per product.
-    Only a title and a price are required; handle (for links), SKU,
-    stock and images are used when the file has them.
-    """
+    """Reads ANY Shopify product export and returns one entry per product.
+    Only a title and a price are required; everything else is optional."""
     df = _read_dataframe(csv_path)
 
     colmap = _map_from_header(df.iloc[0].tolist())
@@ -464,12 +468,22 @@ def load_products(csv_path, store_domain):
         seen.add(key)
 
         img = cell(r, "image").split(",")[0].strip() or image_by_handle.get(handle, "")
+        tag_set = {t.strip().lower() for t in cell(r, "tags").split(",") if t.strip()}
+        cat_text = (cell(r, "category") + " " + cell(r, "type")).lower()
+
+        compare_at = parse_price(cell(r, "compare"))
+        if compare_at is not None and compare_at <= 0:
+            compare_at = None
+
         items.append({
             "url": product_url(store_domain, handle),
             "title": title,
             "sku": sku,
             "qty": to_int_qty(cell(r, "qty")),
             "price": price,
+            "compare_at": compare_at,
+            "tag_set": tag_set,
+            "cat_text": cat_text,
             "image": img,
             "img_path": None,
         })
@@ -477,7 +491,43 @@ def load_products(csv_path, store_domain):
 
 
 # =========================================================
-# Drawing helpers (same style as your original)
+# PREMIUM: grouping products into merchant-named sections
+# =========================================================
+def assign_sections(items, section_names):
+    """The merchant types e.g. "Seerah, Quran, Kids". Each product joins
+    the FIRST section whose name matches one of its Shopify tags (exact
+    tag, part of a tag like 'seerah books', or part of the product
+    category). Anything unmatched goes into a final "More Products"
+    section. Returns a list of (section_name, items); with no names it
+    returns one nameless section containing everything (= no dividers)."""
+    if not section_names:
+        return [(None, items)]
+
+    buckets = {name: [] for name in section_names}
+    rest = []
+    for it in items:
+        placed = False
+        for name in section_names:
+            n = name.strip().lower()
+            if not n:
+                continue
+            if (n in it["tag_set"]
+                    or any(n in tag for tag in it["tag_set"])
+                    or (it["cat_text"].strip() and n in it["cat_text"])):
+                buckets[name].append(it)
+                placed = True
+                break
+        if not placed:
+            rest.append(it)
+
+    sections = [(name, buckets[name]) for name in section_names if buckets[name]]
+    if rest:
+        sections.append(("More Products" if sections else None, rest))
+    return sections
+
+
+# =========================================================
+# Drawing helpers
 # =========================================================
 def resize_contain(img, target_w, target_h, bg=(255, 255, 255)):
     iw, ih = img.size
@@ -561,7 +611,7 @@ def load_logo(path):
     if not path or not os.path.exists(path):
         return None
     try:
-        return flatten_to_white(Image.open(path)) if False else Image.open(path).convert("RGBA")
+        return Image.open(path).convert("RGBA")
     except Exception:
         return None
 
@@ -569,14 +619,30 @@ def load_logo(path):
 # =========================================================
 # Building ONE pdf at ONE discount level
 # =========================================================
-def build_pdf(items, out_path, *, business_name, discount=0.0,
-              currency="£", logo_path="", progress=None):
+def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
+              logo_path="", layout="12", sections=None,
+              use_compare_at=False, show_stock=False, progress=None):
     W, H = A4
     c = canvas.Canvas(out_path, pagesize=A4)
     logo_img = load_logo(logo_path)
     today = date.today().strftime("%d %B %Y")
 
-    discount_label = f"{discount:g}% OFF" if discount > 0 else ""
+    # ---- sizes for the chosen layout (premium: 20 or 30 per page) ----
+    L = LAYOUTS.get(str(layout), LAYOUTS["12"])
+    cols, rows, s = L["cols"], L["rows"], L["scale"]
+    gutter = L["gutter_mm"] * mm
+    img_ratio = L["img_ratio"]
+
+    title_size = TITLE_FONT_SIZE * s
+    title_gap = TITLE_LINE_GAP * s
+    meta_size = max(5.0, META_FONT_SIZE * s)
+    price_size = PRICE_FONT_SIZE * s
+    strike_size = max(5.5, STRIKE_FONT_SIZE * s)
+    pad = IMAGE_PADDING_MM * mm * s
+    radius = CARD_RADIUS * s
+
+    if sections is None:
+        sections = [(None, items)]
 
     def page_bg():
         c.setFillColorRGB(*ZINC_BG)
@@ -594,12 +660,6 @@ def build_pdf(items, out_path, *, business_name, discount=0.0,
         c.setFont("Helvetica-Bold", 11)
         c.drawString(10 * mm + (16 * mm if logo_img else 0),
                      H - header_h + 5.3 * mm, f"{business_name} Catalog")
-        if discount_label:
-            c.setFillColorRGB(*ACCENT)
-            c.setFont("Helvetica-Bold", 9)
-            lbl = f"{discount_label} ALL ITEMS"
-            c.drawCentredString(W / 2 + 20 * mm, H - header_h + 5.3 * mm, lbl)
-        c.setFillColorRGB(*HEADER_TEXT)
         c.setFont("Helvetica", 9)
         c.drawRightString(W - 10 * mm, H - header_h + 5.2 * mm, f"Page {page_no}")
 
@@ -626,139 +686,173 @@ def build_pdf(items, out_path, *, business_name, discount=0.0,
         c.setFillColorRGB(0.45, 0.47, 0.52)
         c.drawCentredString(W / 2, H / 2 - 10 * mm, f"Generated {today}")
 
-        if discount > 0:
-            draw_badge_center(c, W / 2, H / 2 - 26 * mm,
-                              f"  {discount:g}% OFF EVERYTHING  ",
-                              "Helvetica-Bold", 12, 10, 6,
-                              ACCENT, (1, 1, 1), 10)
-
         c.setStrokeColorRGB(*ACCENT)
         c.setLineWidth(2)
         c.line(W * 0.25, H / 2 - 16 * mm, W * 0.75, H / 2 - 16 * mm)
         c.showPage()
 
+    def divider(name, sec_no, count, page_no):
+        """PREMIUM: full divider page announcing the next section."""
+        page_bg()
+        header(page_no)
+        y_mid = H * 0.58
+        c.setFillColorRGB(*ACCENT)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawCentredString(W / 2, y_mid + 18 * mm, f"S E C T I O N   {sec_no}")
+
+        size = 34
+        while c.stringWidth(name, "Helvetica-Bold", size) > W * 0.82 and size > 14:
+            size -= 2
+        c.setFillColorRGB(0.10, 0.12, 0.16)
+        c.setFont("Helvetica-Bold", size)
+        c.drawCentredString(W / 2, y_mid, name)
+
+        c.setStrokeColorRGB(*ACCENT)
+        c.setLineWidth(2)
+        c.line(W * 0.36, y_mid - 8 * mm, W * 0.64, y_mid - 8 * mm)
+
+        c.setFillColorRGB(0.40, 0.42, 0.47)
+        c.setFont("Helvetica", 11)
+        label = "1 product" if count == 1 else f"{count} products"
+        c.drawCentredString(W / 2, y_mid - 16 * mm, label)
+        c.showPage()
+
     def card_frame(x, y, w, h):
         c.setFillColorRGB(*SHADOW)
-        c.roundRect(x + SHADOW_OFFSET, y - SHADOW_OFFSET, w, h, CARD_RADIUS, stroke=0, fill=1)
+        c.roundRect(x + SHADOW_OFFSET * s, y - SHADOW_OFFSET * s, w, h,
+                    radius, stroke=0, fill=1)
         c.setFillColorRGB(*CARD_BG)
         c.setStrokeColorRGB(*CARD_BORDER)
         c.setLineWidth(CARD_BORDER_WIDTH)
-        c.roundRect(x, y, w, h, CARD_RADIUS, stroke=1, fill=1)
+        c.roundRect(x, y, w, h, radius, stroke=1, fill=1)
 
     # ---- layout maths -------------------------------------------------
     cover()
-    margin, gutter = PAGE_MARGIN_MM * mm, GUTTER_MM * mm
+    margin = PAGE_MARGIN_MM * mm
     header_h = 16 * mm
     usable_h = H - header_h - 2 * margin
-    tile_w = (W - 2 * margin - (COLUMNS - 1) * gutter) / COLUMNS
-    tile_h = (usable_h - (ROWS - 1) * gutter) / ROWS
-    img_area_h = tile_h * IMAGE_AREA_RATIO
-    pad = IMAGE_PADDING_MM * mm
+    tile_w = (W - 2 * margin - (cols - 1) * gutter) / cols
+    tile_h = (usable_h - (rows - 1) * gutter) / rows
+    img_area_h = tile_h * img_ratio
 
     dpi_scale = 150 / 72
     img_box_w_px = int((tile_w - 2 * pad) * dpi_scale)
     img_box_h_px = int((img_area_h - 2 * pad) * dpi_scale)
 
-    per_page = COLUMNS * ROWS
-    page_no, page_items = 1, []
-    total = len(items)
+    per_page = cols * rows
+    page_no = 1
+    total = sum(len(sec_items) for _, sec_items in sections) or 1
+    drawn = 0
 
-    for idx, item in enumerate(items):
-        page_items.append(item)
-        if len(page_items) == per_page or idx == total - 1:
+    def draw_card(p, x, y):
+        url = p["url"]
+        card_frame(x, y, tile_w, tile_h)
+        add_link(c, url, (x, y, x + tile_w, y + tile_h))
+
+        # ---------- product photo ----------
+        img_x, img_y = x + pad, y + tile_h - img_area_h + pad
+        img_w, img_h = tile_w - 2 * pad, img_area_h - 2 * pad
+        if p.get("img_path"):
+            try:
+                img = Image.open(p["img_path"]).convert("RGB")
+                tile = resize_contain(img, img_box_w_px, img_box_h_px)
+                c.drawImage(ImageReader(tile), img_x, img_y, img_w, img_h,
+                            preserveAspectRatio=False, mask="auto")
+            except Exception:
+                pass
+        else:
+            c.setFillColorRGB(0.955, 0.955, 0.965)
+            c.roundRect(img_x, img_y, img_w, img_h, 6 * s, stroke=0, fill=1)
+            c.setFillColorRGB(0.62, 0.64, 0.68)
+            c.setFont("Helvetica", max(5.0, 7.5 * s))
+            c.drawCentredString(img_x + img_w / 2, img_y + img_h / 2 - 3,
+                                "Image unavailable")
+
+        # ---------- title ----------
+        text_top_y = y + tile_h - img_area_h - 9 * s
+        title_lines = wrap_title(c, p["title"], tile_w - 14 * s,
+                                 TITLE_FONT, title_size, TITLE_MAX_LINES)
+        c.setFillColorRGB(0.10, 0.12, 0.16)
+        c.setFont(TITLE_FONT, title_size)
+        for i, line in enumerate(title_lines):
+            c.drawCentredString(x + tile_w / 2, text_top_y - i * title_gap, line)
+        add_link(c, url, (x + 6 * s,
+                          text_top_y - len(title_lines) * title_gap - 2,
+                          x + tile_w - 6 * s, text_top_y + 6 * s))
+
+        # ---------- price badge / crossed-out price / info pill ----------
+        final_price = round(p["price"] * (1 - discount / 100.0), 2)
+
+        # PREMIUM compare-at: prefer the store's own "was" price when it
+        # beats the price we're showing; otherwise fall back to the
+        # pre-discount price (free behaviour).
+        strike_val = None
+        if use_compare_at and p.get("compare_at") and p["compare_at"] > final_price:
+            strike_val = p["compare_at"]
+        elif discount > 0:
+            strike_val = p["price"]
+
+        badge_y = y + 6 * s
+        bx1, by1, bx2, by2, badge_h = draw_badge_center(
+            c, x + tile_w / 2, badge_y, format_money(final_price, currency),
+            PRICE_FONT, price_size, 7 * s, 4 * s,
+            PRICE_BADGE_BG, PRICE_BADGE_TEXT, 8 * s)
+        add_link(c, url, (bx1, by1, bx2, by2))
+
+        next_y = badge_y + badge_h + 3 * s
+        if strike_val:
+            old = format_money(strike_val, currency)
+            c.setFont(STRIKE_FONT, strike_size)
+            c.setFillColorRGB(*STRIKE_COLOR)
+            tw = c.stringWidth(old, STRIKE_FONT, strike_size)
+            sx = x + tile_w / 2 - tw / 2
+            c.drawString(sx, next_y, old)
+            c.setStrokeColorRGB(*STRIKE_COLOR)
+            c.setLineWidth(0.9 * s)
+            c.line(sx - 1, next_y + strike_size * 0.32,
+                   sx + tw + 1, next_y + strike_size * 0.32)
+            next_y += strike_size + 4 * s
+
+        # one pill showing whatever info this product has (stock = PREMIUM)
+        parts = []
+        if p["sku"]:
+            parts.append(f"SKU {p['sku']}")
+        if show_stock and p["qty"] > 0:
+            parts.append(f"{p['qty']} in stock")
+        pill_text = "  \u2022  ".join(parts)
+        c.setFont(META_FONT, meta_size)
+        if (pill_text and
+                c.stringWidth(pill_text, META_FONT, meta_size) > tile_w - 20 * s):
+            pill_text = parts[0]                   # too wide? keep the SKU
+        if pill_text:
+            px1, py1, px2, py2, _ = draw_badge_center(
+                c, x + tile_w / 2, next_y, pill_text,
+                META_FONT, meta_size, 6 * s, 3 * s,
+                META_PILL_BG, META_PILL_TEXT, 7 * s, border=META_PILL_BORDER)
+            add_link(c, url, (px1, py1, px2, py2))
+
+    # ---- pages: (divider +) product grids, section by section ----------
+    for sec_no, (sec_name, sec_items) in enumerate(sections, start=1):
+        if sec_name:
+            divider(sec_name, sec_no, len(sec_items), page_no)
+            page_no += 1
+
+        for start in range(0, len(sec_items), per_page):
+            chunk = sec_items[start:start + per_page]
             page_bg()
             header(page_no)
             top_y = H - header_h - margin
-
-            for n, p in enumerate(page_items):
-                r, col = n // COLUMNS, n % COLUMNS
+            for n, p in enumerate(chunk):
+                r, col = n // cols, n % cols
                 x = margin + col * (tile_w + gutter)
                 y = top_y - (r + 1) * tile_h - r * gutter
-                url = p["url"]
-
-                card_frame(x, y, tile_w, tile_h)
-                add_link(c, url, (x, y, x + tile_w, y + tile_h))
-
-                # ---------- product photo ----------
-                img_x, img_y = x + pad, y + tile_h - img_area_h + pad
-                img_w, img_h = tile_w - 2 * pad, img_area_h - 2 * pad
-                if p.get("img_path"):
-                    try:
-                        img = Image.open(p["img_path"]).convert("RGB")
-                        tile = resize_contain(img, img_box_w_px, img_box_h_px)
-                        c.drawImage(ImageReader(tile), img_x, img_y, img_w, img_h,
-                                    preserveAspectRatio=False, mask="auto")
-                    except Exception:
-                        pass
-                else:
-                    # tidy placeholder instead of an ugly empty gap
-                    c.setFillColorRGB(0.955, 0.955, 0.965)
-                    c.roundRect(img_x, img_y, img_w, img_h, 6, stroke=0, fill=1)
-                    c.setFillColorRGB(0.62, 0.64, 0.68)
-                    c.setFont("Helvetica", 7.5)
-                    c.drawCentredString(img_x + img_w / 2, img_y + img_h / 2 - 3,
-                                        "Image unavailable")
-
-                # ---------- title ----------
-                text_top_y = y + tile_h - img_area_h - 9
-                title_lines = wrap_title(c, p["title"], tile_w - 14,
-                                         TITLE_FONT, TITLE_FONT_SIZE, TITLE_MAX_LINES)
-                c.setFillColorRGB(0.10, 0.12, 0.16)
-                c.setFont(TITLE_FONT, TITLE_FONT_SIZE)
-                for i, line in enumerate(title_lines):
-                    c.drawCentredString(x + tile_w / 2,
-                                        text_top_y - i * TITLE_LINE_GAP, line)
-                add_link(c, url, (x + 6,
-                                  text_top_y - len(title_lines) * TITLE_LINE_GAP - 2,
-                                  x + tile_w - 6, text_top_y + 6))
-
-                # ---------- bottom stack: price badge / old price / info pill ----------
-                final_price = round(p["price"] * (1 - discount / 100.0), 2)
-                badge_y = y + 6
-                bx1, by1, bx2, by2, badge_h = draw_badge_center(
-                    c, x + tile_w / 2, badge_y, format_money(final_price, currency),
-                    PRICE_FONT, PRICE_FONT_SIZE, 7, 4,
-                    PRICE_BADGE_BG, PRICE_BADGE_TEXT, 8)
-                add_link(c, url, (bx1, by1, bx2, by2))
-
-                next_y = badge_y + badge_h + 3
-                if discount > 0:
-                    old = format_money(p["price"], currency)
-                    c.setFont(STRIKE_FONT, STRIKE_FONT_SIZE)
-                    c.setFillColorRGB(*STRIKE_COLOR)
-                    tw = c.stringWidth(old, STRIKE_FONT, STRIKE_FONT_SIZE)
-                    sx = x + tile_w / 2 - tw / 2
-                    c.drawString(sx, next_y, old)
-                    c.setStrokeColorRGB(*STRIKE_COLOR)
-                    c.setLineWidth(0.9)
-                    c.line(sx - 1, next_y + STRIKE_FONT_SIZE * 0.32,
-                           sx + tw + 1, next_y + STRIKE_FONT_SIZE * 0.32)
-                    next_y += STRIKE_FONT_SIZE + 4
-
-                # one pill showing whatever info this product has:
-                # "SKU X  •  N in stock", just one of them, or no pill
-                parts = []
-                if p["sku"]:
-                    parts.append(f"SKU {p['sku']}")
-                if p["qty"] > 0:
-                    parts.append(f"{p['qty']} in stock")
-                pill_text = "  \u2022  ".join(parts)
-                c.setFont(META_FONT, META_FONT_SIZE)
-                if (pill_text and
-                        c.stringWidth(pill_text, META_FONT, META_FONT_SIZE) > tile_w - 24):
-                    pill_text = parts[0]           # too wide? keep the SKU
-                if pill_text:
-                    px1, py1, px2, py2, _ = draw_badge_center(
-                        c, x + tile_w / 2, next_y, pill_text,
-                        META_FONT, META_FONT_SIZE, 6, 3,
-                        META_PILL_BG, META_PILL_TEXT, 7, border=META_PILL_BORDER)
-                    add_link(c, url, (px1, py1, px2, py2))
-
+                draw_card(p, x, y)
+                drawn_now = drawn + n + 1
+                if progress:
+                    progress(drawn_now / total, None)
+            drawn += len(chunk)
             c.showPage()
-            page_items = []
             page_no += 1
-            if progress:
-                progress(min(idx + 1, total) / total, None)
 
     c.save()
     return out_path
@@ -767,12 +861,15 @@ def build_pdf(items, out_path, *, business_name, discount=0.0,
 # =========================================================
 # The one function app.py calls
 # =========================================================
-def build_catalogs(items, job_dir, *, business_name, discounts,
-                   currency="£", logo_path="", progress=None):
+def build_catalogs(items, job_dir, *, business_name, discounts, currency="£",
+                   logo_path="", layout="12", section_names=None,
+                   use_compare_at=False, show_stock=False, progress=None):
     """
-    items      : list from load_products()  (photos not yet downloaded)
-    job_dir    : private folder for this customer's job
-    discounts  : e.g. [0, 10, 20]  -> makes 3 PDFs
+    items         : list from load_products()  (photos not yet downloaded)
+    job_dir       : private folder for this customer's job
+    discounts     : e.g. [0, 10, 20]  -> makes 3 PDFs
+    layout        : "12" (free) or "20"/"30" per page (premium)
+    section_names : e.g. ["Seerah", "Quran"] -> divider pages (premium)
     Returns (path_to_give_customer, list_of_pdf_paths)
     """
     def report(pct, msg):
@@ -787,7 +884,10 @@ def build_catalogs(items, job_dir, *, business_name, discounts,
         progress=lambda frac, msg: report(0.02 + frac * 0.63, msg),
     )
 
-    # 2) build one PDF per discount level (65% -> 95%)
+    # 2) group into sections once (same grouping for every discount level)
+    sections = assign_sections(items, section_names or [])
+
+    # 3) build one PDF per discount level (65% -> 95%)
     safe_name = safe_filename(business_name) or "catalog"
     pdf_paths = []
     n = len(discounts)
@@ -797,12 +897,14 @@ def build_catalogs(items, job_dir, *, business_name, discounts,
         report(0.65 + (i / n) * 0.30, f"Building catalog {i + 1} of {n} ({nice})")
         out = os.path.join(job_dir, f"{safe_name}_catalog_{label}.pdf")
         build_pdf(items, out, business_name=business_name, discount=d,
-                  currency=currency, logo_path=logo_path,
+                  currency=currency, logo_path=logo_path, layout=layout,
+                  sections=sections, use_compare_at=use_compare_at,
+                  show_stock=show_stock,
                   progress=lambda frac, _m, base=0.65 + (i / n) * 0.30, span=0.30 / n:
                       report(base + frac * span, None))
         pdf_paths.append(out)
 
-    # 3) one PDF -> hand it straight over; several -> zip them together
+    # 4) one PDF -> hand it straight over; several -> zip them together
     if len(pdf_paths) == 1:
         report(1.0, "Done")
         return pdf_paths[0], pdf_paths
