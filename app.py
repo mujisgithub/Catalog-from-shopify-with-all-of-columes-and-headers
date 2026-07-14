@@ -16,18 +16,14 @@ How one visit flows through this file:
   3. asks every 1.5 sec  ->     "/status/id" replies {percent, message}
   4. job finishes        ->     "/download/id" sends the PDF or ZIP
 
-Why the background-job dance instead of just replying with the PDF?
-Because downloading 300 product photos can take a minute or two, and
-web requests that run that long get cut off by hosting providers.
-This pattern (start job -> poll -> download) is the standard fix and
-it also gives your customers a nice live progress bar.
-
 MAKING MONEY (optional, off by default):
   Set two environment variables on your host and the app becomes freemium:
     FREE_PRODUCT_LIMIT = 25
     LICENSE_KEYS       = KEY-ABC123, KEY-XYZ789
-  Catalogs over the limit then require one of those keys, which you sell
-  through a Stripe Payment Link (see README.md, step "Charge for it").
+  Catalogs over the limit - and all PREMIUM features (category sections,
+  compact layouts, compare-at prices, stock counts) - then require one of
+  those keys, which you sell through a Stripe Payment Link.
+  While LICENSE_KEYS is unset, everything stays free so you can test.
 """
 
 import os
@@ -101,6 +97,18 @@ def parse_discounts(raw):
     return sorted(values)
 
 
+def parse_sections(raw):
+    """'Seerah, Quran, Kids' -> ['Seerah', 'Quran', 'Kids']. Premium."""
+    names = []
+    for part in (raw or "").split(","):
+        p = part.strip()[:40]
+        if p and p.lower() not in [n.lower() for n in names]:
+            names.append(p)
+    if len(names) > 12:
+        raise ValueError("Maximum 12 category sections per catalog.")
+    return names
+
+
 def clean_store_url(raw):
     url = (raw or "").strip().rstrip("/")
     if not url:
@@ -146,6 +154,10 @@ def run_job(job_id, items, job_dir, options):
             discounts=options["discounts"],
             currency=options["currency"],
             logo_path=options["logo_path"],
+            layout=options.get("layout", "12"),
+            section_names=options.get("section_names"),
+            use_compare_at=options.get("use_compare_at", False),
+            show_stock=options.get("show_stock", False),
             progress=set_progress,
         )
         with JOBS_LOCK:
@@ -196,12 +208,19 @@ def generate():
     try:
         store_url = clean_store_url(request.form.get("store_url"))
         discounts = parse_discounts(request.form.get("discounts"))
+        section_names = parse_sections(request.form.get("sections"))
     except ValueError as e:
         return jsonify(error=str(e)), 400
 
     currency = request.form.get("currency", "£")
     if currency not in ("£", "$", "€"):
         currency = "£"
+
+    layout = request.form.get("layout", "12")
+    if layout not in ("12", "20", "30"):
+        layout = "12"
+    use_compare_at = request.form.get("compare_at") == "on"
+    show_stock = request.form.get("show_stock") == "on"
 
     # ---- 2. save the uploads into this job's private folder ----------
     job_id = uuid.uuid4().hex
@@ -237,12 +256,31 @@ def generate():
                              f"{MAX_PRODUCTS} per catalog."), 400
 
     # ---- 4. optional paywall ------------------------------------------
+    key_ok = license_key_valid(request.form.get("license_key", ""))
+    paywall_on = bool(os.environ.get("LICENSE_KEYS", "").strip())
+
     limit = free_limit()
-    if limit and len(items) > limit and not license_key_valid(request.form.get("license_key", "")):
+    if limit and len(items) > limit and not key_ok:
         shutil.rmtree(job_dir, ignore_errors=True)
         return jsonify(error=f"The free plan covers up to {limit} products "
                              f"(your file has {len(items)}). Enter a license key "
                              "to unlock unlimited catalogs.",
+                       upgrade=True), 402
+
+    premium_used = []
+    if section_names:
+        premium_used.append("category sections")
+    if layout != "12":
+        premium_used.append(f"{layout}-per-page layout")
+    if use_compare_at:
+        premium_used.append("compare-at prices")
+    if show_stock:
+        premium_used.append("stock counts")
+    if paywall_on and premium_used and not key_ok:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return jsonify(error="These are premium features: "
+                             + ", ".join(premium_used)
+                             + ". Enter a license key to use them.",
                        upgrade=True), 402
 
     # ---- 5. start the background job and reply straight away ---------
@@ -252,7 +290,9 @@ def generate():
                         "download_name": None, "created": time.time()}
 
     options = {"business_name": business_name, "discounts": discounts,
-               "currency": currency, "logo_path": logo_path}
+               "currency": currency, "logo_path": logo_path,
+               "layout": layout, "section_names": section_names,
+               "use_compare_at": use_compare_at, "show_stock": show_stock}
     threading.Thread(target=run_job, args=(job_id, items, job_dir, options),
                      daemon=True).start()
 
