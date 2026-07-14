@@ -621,7 +621,8 @@ def load_logo(path):
 # =========================================================
 def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
               logo_path="", layout="12", sections=None,
-              use_compare_at=False, show_stock=False, progress=None):
+              use_compare_at=False, show_stock=False,
+              branding_text="", branding_url="", progress=None):
     W, H = A4
     c = canvas.Canvas(out_path, pagesize=A4)
     logo_img = load_logo(logo_path)
@@ -647,6 +648,19 @@ def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
     def page_bg():
         c.setFillColorRGB(*ZINC_BG)
         c.rect(0, 0, W, H, stroke=0, fill=1)
+
+    def footer():
+        """FREE tier: a small clickable line back to your site at the foot
+        of every page. Paying customers get clean, unbranded PDFs."""
+        if not branding_text:
+            return
+        c.setFont("Helvetica", 7.5)
+        c.setFillColorRGB(0.55, 0.57, 0.62)
+        c.drawCentredString(W / 2, 4.2 * mm, branding_text)
+        if branding_url:
+            tw = c.stringWidth(branding_text, "Helvetica", 7.5)
+            add_link(c, branding_url,
+                     (W / 2 - tw / 2, 3 * mm, W / 2 + tw / 2, 7.5 * mm))
 
     def header(page_no):
         header_h = 16 * mm
@@ -689,6 +703,7 @@ def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
         c.setStrokeColorRGB(*ACCENT)
         c.setLineWidth(2)
         c.line(W * 0.25, H / 2 - 16 * mm, W * 0.75, H / 2 - 16 * mm)
+        footer()
         c.showPage()
 
     def divider(name, sec_no, count, page_no):
@@ -715,6 +730,7 @@ def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
         c.setFont("Helvetica", 11)
         label = "1 product" if count == 1 else f"{count} products"
         c.drawCentredString(W / 2, y_mid - 16 * mm, label)
+        footer()
         c.showPage()
 
     def card_frame(x, y, w, h):
@@ -851,6 +867,7 @@ def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
                 if progress:
                     progress(drawn_now / total, None)
             drawn += len(chunk)
+            footer()
             c.showPage()
             page_no += 1
 
@@ -863,7 +880,8 @@ def build_pdf(items, out_path, *, business_name, discount=0.0, currency="£",
 # =========================================================
 def build_catalogs(items, job_dir, *, business_name, discounts, currency="£",
                    logo_path="", layout="12", section_names=None,
-                   use_compare_at=False, show_stock=False, progress=None):
+                   use_compare_at=False, show_stock=False,
+                   branding_text="", branding_url="", progress=None):
     """
     items         : list from load_products()  (photos not yet downloaded)
     job_dir       : private folder for this customer's job
@@ -900,6 +918,7 @@ def build_catalogs(items, job_dir, *, business_name, discounts, currency="£",
                   currency=currency, logo_path=logo_path, layout=layout,
                   sections=sections, use_compare_at=use_compare_at,
                   show_stock=show_stock,
+                  branding_text=branding_text, branding_url=branding_url,
                   progress=lambda frac, _m, base=0.65 + (i / n) * 0.30, span=0.30 / n:
                       report(base + frac * span, None))
         pdf_paths.append(out)
