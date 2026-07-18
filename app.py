@@ -22,12 +22,11 @@ web requests that run that long get cut off by hosting providers.
 This pattern (start job -> poll -> download) is the standard fix and
 it also gives your customers a nice live progress bar.
 
-MAKING MONEY (optional, off by default):
-  Set two environment variables on your host and the app becomes freemium:
-    FREE_PRODUCT_LIMIT = 25
-    LICENSE_KEYS       = KEY-ABC123, KEY-XYZ789
-  Catalogs over the limit then require one of those keys, which you sell
-  through a Stripe Payment Link (see README.md, step "Charge for it").
+MAKING MONEY (automatic):
+  Set STRIPE_SECRET_KEY plus PAY_LINK_BASIC / PAY_LINK_PRO in your host's
+  environment and the paywall switches on. Customers pay through your
+  Stripe Payment Link, come straight back, and are unlocked automatically -
+  their Stripe receipt is verified server-side and becomes their license.
 """
 
 import os
@@ -37,7 +36,8 @@ import uuid
 import shutil
 import threading
 
-from flask import Flask, request, jsonify, send_file
+import requests
+from flask import Flask, request, jsonify, send_file, redirect
 from werkzeug.utils import secure_filename
 
 from catalog_maker import load_products, build_catalogs
@@ -130,25 +130,93 @@ def _keys(env_name):
 
 def key_tier(key):
     """Which tier does this license key unlock?
-      'pro'   - keys listed in LICENSE_KEYS_PRO (or the old LICENSE_KEYS)
-                -> unlimited products + ALL premium features + no branding
-      'basic' - keys listed in LICENSE_KEYS_BASIC
-                -> unlimited products + no branding
-      None    - no valid key entered (free tier)"""
+      'pro'   - keys listed in LICENSE_KEYS_PRO (or the old LICENSE_KEYS),
+                or a verified Stripe payment at the Pro price / subscription
+      'basic' - keys listed in LICENSE_KEYS_BASIC, or a verified Stripe
+                payment at the Basic price
+      None    - no valid key (free tier)
+    Keys starting with cs_ are Stripe checkout receipts and get verified
+    with Stripe automatically - no manual work for you at all."""
     key = (key or "").strip()
-    if not key:
+    if not key or key in _keys("BLOCKED_KEYS"):    # refunds: block a key here
         return None
     if key in (_keys("LICENSE_KEYS_PRO") | _keys("LICENSE_KEYS")):
         return "pro"
     if key in _keys("LICENSE_KEYS_BASIC"):
         return "basic"
+    if key.startswith("cs_"):
+        return stripe_session_tier(key)
     return None
 
 
+# ----------------------------------------------------------
+# AUTOMATIC payments: verifying Stripe receipts
+# ----------------------------------------------------------
+# When a customer pays through your Stripe Payment Link, Stripe sends them
+# back to /thanks with a "checkout session id" (cs_...). That id IS their
+# license key: we ask Stripe's servers directly whether it was really paid
+# (nobody can fake that - it needs your SECRET key, which lives only in
+# Render's Environment as STRIPE_SECRET_KEY, never in this code).
+#
+# Verified keys are remembered in memory so we don't ask Stripe on every
+# click. Subscriptions are re-checked once a day, so cancelled subscribers
+# lose access automatically.
+_VERIFIED = {}          # session_id -> (tier, checked_at, is_subscription)
+_SUB_RECHECK_SECONDS = 24 * 60 * 60
+
+
+def stripe_session_tier(session_id):
+    if not re.fullmatch(r"cs_[A-Za-z0-9_]+", session_id or ""):
+        return None
+    now = time.time()
+    cached = _VERIFIED.get(session_id)
+    if cached:
+        tier, checked_at, is_sub = cached
+        if not is_sub or now - checked_at < _SUB_RECHECK_SECONDS:
+            return tier
+
+    secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if not secret:
+        return None
+    try:
+        r = requests.get(
+            "https://api.stripe.com/v1/checkout/sessions/" + session_id,
+            auth=(secret, ""), timeout=15)
+        if r.status_code != 200:
+            return None
+        session = r.json()
+        if session.get("payment_status") != "paid":
+            return None
+
+        is_sub = session.get("mode") == "subscription"
+        if is_sub:
+            # Subscribers keep access only while the subscription is alive
+            sub_id = session.get("subscription")
+            r2 = requests.get("https://api.stripe.com/v1/subscriptions/" + str(sub_id),
+                              auth=(secret, ""), timeout=15)
+            if r2.status_code != 200 or r2.json().get("status") not in ("active", "trialing"):
+                _VERIFIED.pop(session_id, None)
+                return None
+            tier = "pro"
+        else:
+            # One-off payments: £7+ is Pro, under that is Basic.
+            # (Amounts are in pence; change PRO_PRICE_PENCE if you reprice.)
+            pro_pence = int(os.environ.get("PRO_PRICE_PENCE", "700"))
+            tier = "pro" if (session.get("amount_total") or 0) >= pro_pence else "basic"
+
+        _VERIFIED[session_id] = (tier, now, is_sub)
+        return tier
+    except Exception:                              # noqa: BLE001
+        # Network hiccup talking to Stripe: honour a previous verification
+        return cached[0] if cached else None
+
+
 def paywall_on():
-    """The paywall switches on as soon as ANY key list has a key in it."""
+    """The paywall switches on when key lists are configured OR Stripe
+    automatic payments are connected (STRIPE_SECRET_KEY is set)."""
     return bool(_keys("LICENSE_KEYS") or _keys("LICENSE_KEYS_BASIC")
-                or _keys("LICENSE_KEYS_PRO"))
+                or _keys("LICENSE_KEYS_PRO")
+                or os.environ.get("STRIPE_SECRET_KEY", "").strip())
 
 
 def free_limit():
@@ -215,6 +283,36 @@ def index():
     return ("<h1>Almost there</h1><p>index.html is missing from the "
             "deployment. Upload it to your GitHub repository (ideally "
             "inside the templates folder) and Render will redeploy.</p>"), 500
+
+
+@app.route("/thanks")
+def thanks():
+    """Stripe sends customers here after a successful payment, with their
+    checkout receipt in the address. We verify it really was paid, then
+    send them back to the homepage where the page auto-fills their key
+    and unlocks everything - no manual steps for anyone."""
+    session_id = request.args.get("session_id", "").strip()
+    tier = stripe_session_tier(session_id) if session_id else None
+    if tier:
+        return redirect(f"/?key={session_id}&tier={tier}")
+    return ("""<!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta http-equiv="refresh" content="4">
+        <title>Confirming your payment…</title>
+        <style>body{font-family:sans-serif;background:#F4F4F1;color:#1A1F29;
+        display:grid;place-items:center;min-height:90vh;text-align:center}</style>
+        </head><body><div><h2>Confirming your payment…</h2>
+        <p>This page checks again every few seconds.<br>
+        If it doesn't confirm within a minute, go back to the site and
+        try generating - or contact us with your Stripe receipt email.</p>
+        <p><a href="/">Back to CatalogPress</a></p></div></body></html>"""), 202
+
+
+@app.route("/pricing")
+def pricing():
+    """Tells the page which payment links exist, so it can show
+    Basic / Pro buy links under the license key box."""
+    return jsonify(basic=os.environ.get("PAY_LINK_BASIC", "").strip(),
+                   pro=os.environ.get("PAY_LINK_PRO", "").strip())
 
 
 @app.route("/generate", methods=["POST"])
@@ -285,7 +383,7 @@ def generate():
                              f"{MAX_PRODUCTS} per catalog."), 400
 
     # ---- 4. the paywall -----------------------------------------------
-    # Two tiers of license key, sold through your payment links:
+    # Two tiers, paid through your Stripe links and verified automatically:
     #   BASIC (£3 one-off)         -> unlimited products, no branding
     #   PRO   (£7 or subscription) -> everything: unlimited products,
     #                                 all premium features, no branding
@@ -311,9 +409,9 @@ def generate():
         return jsonify(error=f"The free plan covers up to {limit} products and "
                              f"your file has {len(items)}. Unlock unlimited "
                              "products for £3 one-off — or go Pro for £7 to get "
-                             "every premium feature too. After paying you'll "
-                             "receive a license key by email; paste it into the "
-                             "license key box and generate again.",
+                             "every premium feature too. Payment takes under a "
+                             "minute and you'll be brought straight back here, "
+                             "unlocked automatically.",
                        upgrade=True,
                        pay_url=(pay_pro if premium_used else pay_basic)
                                or pay_basic or pay_pro), 402
@@ -323,12 +421,13 @@ def generate():
         if tier == "basic":
             msg = ("Your key unlocks unlimited products, but these are Pro "
                    "features: " + ", ".join(premium_used)
-                   + ". Upgrade to a Pro key (£7) to use them.")
+                   + ". Upgrade to Pro (£7) to use them — you'll be brought "
+                     "straight back and unlocked automatically.")
         else:
             msg = ("These are Pro features: " + ", ".join(premium_used)
-                   + ". Get a Pro key for £7 one-off — after paying you'll "
-                     "receive your key by email; paste it into the license "
-                     "key box and generate again.")
+                   + ". Go Pro for £7 one-off — payment takes under a minute "
+                     "and you'll be brought straight back here, unlocked "
+                     "automatically.")
         return jsonify(error=msg, upgrade=True, pay_url=pay_pro), 402
 
     # Free catalogs carry a small clickable footer back to this site -
