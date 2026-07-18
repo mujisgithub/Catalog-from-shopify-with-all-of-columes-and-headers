@@ -16,14 +16,18 @@ How one visit flows through this file:
   3. asks every 1.5 sec  ->     "/status/id" replies {percent, message}
   4. job finishes        ->     "/download/id" sends the PDF or ZIP
 
+Why the background-job dance instead of just replying with the PDF?
+Because downloading 300 product photos can take a minute or two, and
+web requests that run that long get cut off by hosting providers.
+This pattern (start job -> poll -> download) is the standard fix and
+it also gives your customers a nice live progress bar.
+
 MAKING MONEY (optional, off by default):
   Set two environment variables on your host and the app becomes freemium:
     FREE_PRODUCT_LIMIT = 25
     LICENSE_KEYS       = KEY-ABC123, KEY-XYZ789
-  Catalogs over the limit - and all PREMIUM features (category sections,
-  compact layouts, compare-at prices, stock counts) - then require one of
-  those keys, which you sell through a Stripe Payment Link.
-  While LICENSE_KEYS is unset, everything stays free so you can test.
+  Catalogs over the limit then require one of those keys, which you sell
+  through a Stripe Payment Link (see README.md, step "Charge for it").
 """
 
 import os
@@ -120,15 +124,34 @@ def clean_store_url(raw):
     return url
 
 
-def license_key_valid(key):
-    allowed = {k.strip() for k in os.environ.get("LICENSE_KEYS", "").split(",") if k.strip()}
-    return key.strip() in allowed if allowed else False
+def _keys(env_name):
+    return {k.strip() for k in os.environ.get(env_name, "").split(",") if k.strip()}
+
+
+def key_tier(key):
+    """Which tier does this license key unlock?
+      'pro'   - keys listed in LICENSE_KEYS_PRO (or the old LICENSE_KEYS)
+                -> unlimited products + ALL premium features + no branding
+      'basic' - keys listed in LICENSE_KEYS_BASIC
+                -> unlimited products + no branding
+      None    - no valid key entered (free tier)"""
+    key = (key or "").strip()
+    if not key:
+        return None
+    if key in (_keys("LICENSE_KEYS_PRO") | _keys("LICENSE_KEYS")):
+        return "pro"
+    if key in _keys("LICENSE_KEYS_BASIC"):
+        return "basic"
+    return None
+
+
+def paywall_on():
+    """The paywall switches on as soon as ANY key list has a key in it."""
+    return bool(_keys("LICENSE_KEYS") or _keys("LICENSE_KEYS_BASIC")
+                or _keys("LICENSE_KEYS_PRO"))
 
 
 def free_limit():
-    """0 means 'no paywall configured, everything is free'."""
-    if not os.environ.get("LICENSE_KEYS", "").strip():
-        return 0
     try:
         return int(os.environ.get("FREE_PRODUCT_LIMIT", "25"))
     except ValueError:
@@ -158,6 +181,8 @@ def run_job(job_id, items, job_dir, options):
             section_names=options.get("section_names"),
             use_compare_at=options.get("use_compare_at", False),
             show_stock=options.get("show_stock", False),
+            branding_text=options.get("branding_text", ""),
+            branding_url=options.get("branding_url", ""),
             progress=set_progress,
         )
         with JOBS_LOCK:
@@ -212,8 +237,12 @@ def generate():
     except ValueError as e:
         return jsonify(error=str(e)), 400
 
+    # PDF fonts can only draw Western characters, so currencies whose symbol
+    # needs special glyphs (like the rupee or riyal signs) use their standard
+    # letter codes instead - that's normal on trade price lists anyway.
     currency = request.form.get("currency", "£")
-    if currency not in ("£", "$", "€"):
+    if currency not in ("£", "$", "€", "SAR ", "AED ", "Rs ", "Rp ",
+                        "RM ", "BDT ", "TL "):
         currency = "£"
 
     layout = request.form.get("layout", "12")
@@ -255,17 +284,14 @@ def generate():
         return jsonify(error=f"That's {len(items)} products — the limit is "
                              f"{MAX_PRODUCTS} per catalog."), 400
 
-    # ---- 4. optional paywall ------------------------------------------
-    key_ok = license_key_valid(request.form.get("license_key", ""))
-    paywall_on = bool(os.environ.get("LICENSE_KEYS", "").strip())
-
+    # ---- 4. the paywall -----------------------------------------------
+    # Two tiers of license key, sold through your payment links:
+    #   BASIC (£3 one-off)         -> unlimited products, no branding
+    #   PRO   (£7 or subscription) -> everything: unlimited products,
+    #                                 all premium features, no branding
+    tier = key_tier(request.form.get("license_key", ""))
+    wall = paywall_on()
     limit = free_limit()
-    if limit and len(items) > limit and not key_ok:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error=f"The free plan covers up to {limit} products "
-                             f"(your file has {len(items)}). Enter a license key "
-                             "to unlock unlimited catalogs.",
-                       upgrade=True), 402
 
     premium_used = []
     if section_names:
@@ -276,12 +302,44 @@ def generate():
         premium_used.append("compare-at prices")
     if show_stock:
         premium_used.append("stock counts")
-    if paywall_on and premium_used and not key_ok:
+
+    pay_basic = os.environ.get("PAY_LINK_BASIC", "").strip()
+    pay_pro = os.environ.get("PAY_LINK_PRO", "").strip()
+
+    if wall and limit and len(items) > limit and tier is None:
         shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error="These are premium features: "
-                             + ", ".join(premium_used)
-                             + ". Enter a license key to use them.",
-                       upgrade=True), 402
+        return jsonify(error=f"The free plan covers up to {limit} products and "
+                             f"your file has {len(items)}. Unlock unlimited "
+                             "products for £3 one-off — or go Pro for £7 to get "
+                             "every premium feature too. After paying you'll "
+                             "receive a license key by email; paste it into the "
+                             "license key box and generate again.",
+                       upgrade=True,
+                       pay_url=(pay_pro if premium_used else pay_basic)
+                               or pay_basic or pay_pro), 402
+
+    if wall and premium_used and tier != "pro":
+        shutil.rmtree(job_dir, ignore_errors=True)
+        if tier == "basic":
+            msg = ("Your key unlocks unlimited products, but these are Pro "
+                   "features: " + ", ".join(premium_used)
+                   + ". Upgrade to a Pro key (£7) to use them.")
+        else:
+            msg = ("These are Pro features: " + ", ".join(premium_used)
+                   + ". Get a Pro key for £7 one-off — after paying you'll "
+                     "receive your key by email; paste it into the license "
+                     "key box and generate again.")
+        return jsonify(error=msg, upgrade=True, pay_url=pay_pro), 402
+
+    # Free catalogs carry a small clickable footer back to this site -
+    # every shared PDF advertises you. Any paying customer gets clean PDFs.
+    if tier is None:
+        branding_text = os.environ.get(
+            "BRAND_TEXT", "Made with CatalogPress · catalog-from-shopify.onrender.com")
+        branding_url = os.environ.get(
+            "BRAND_URL", "https://catalog-from-shopify.onrender.com")
+    else:
+        branding_text = branding_url = ""
 
     # ---- 5. start the background job and reply straight away ---------
     with JOBS_LOCK:
@@ -292,7 +350,8 @@ def generate():
     options = {"business_name": business_name, "discounts": discounts,
                "currency": currency, "logo_path": logo_path,
                "layout": layout, "section_names": section_names,
-               "use_compare_at": use_compare_at, "show_stock": show_stock}
+               "use_compare_at": use_compare_at, "show_stock": show_stock,
+               "branding_text": branding_text, "branding_url": branding_url}
     threading.Thread(target=run_job, args=(job_id, items, job_dir, options),
                      daemon=True).start()
 
