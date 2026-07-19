@@ -6,11 +6,17 @@
 <title>CatalogPress — PDF catalogs from your Shopify export</title>
 <meta name="description" content="Upload your Shopify product export and download a designed, clickable PDF catalog in minutes — with discount price tiers for wholesale and trade customers.">
 
+<!-- Fonts: characterful display + calm body + mono for price-tag details -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 
 <style>
+/* =========================================================
+   Design tokens — the whole site is built from these.
+   They deliberately match the PDF the tool produces:
+   ink #1A1F29 header bar, brass #D9A626 accent, zinc paper.
+   ========================================================= */
 :root{
   --paper:#F4F4F1;
   --card:#FFFFFF;
@@ -43,6 +49,7 @@ a{color:inherit}
 
 .wrap{max-width:1060px; margin:0 auto; padding:0 22px}
 
+/* ============ top bar — same ink bar as the PDF header ============ */
 .topbar{background:var(--ink); color:#fff}
 .topbar .wrap{display:flex; align-items:center; justify-content:space-between; height:60px}
 .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:800; font-size:1.1rem; letter-spacing:.2px; text-decoration:none}
@@ -50,6 +57,7 @@ a{color:inherit}
 .topbar nav a{color:#E7E9EE; text-decoration:none; font-size:.92rem; margin-left:22px}
 .topbar nav a:hover{color:#fff; text-decoration:underline; text-underline-offset:4px}
 
+/* ============ hero ============ */
 .hero{padding:64px 0 40px}
 .hero .wrap{display:grid; grid-template-columns:1.15fr .85fr; gap:48px; align-items:center}
 .kicker{font-family:var(--font-mono); font-size:.78rem; letter-spacing:.14em; text-transform:uppercase; color:var(--brass-dark)}
@@ -70,11 +78,13 @@ h1 .under{box-shadow:inset 0 -0.28em 0 rgba(217,166,38,.45)}
 .btn[disabled]{opacity:.55; cursor:not-allowed; transform:none}
 .hero-note{font-size:.9rem; color:var(--muted)}
 
+/* the three real steps */
 .steps{margin-top:38px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
 .step{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
 .step b{display:block; font-family:var(--font-mono); font-size:.72rem; letter-spacing:.12em; color:var(--brass-dark); margin-bottom:6px}
 .step span{font-size:.9rem; color:var(--ink-soft)}
 
+/* ============ signature: a live catalog card with cycling discounts ============ */
 .stage{position:relative; display:grid; place-items:center; padding:10px 0}
 .sheet{position:absolute; inset:8% 6% 4% 10%; background:#fff; border:1px solid var(--line); border-radius:16px; transform:rotate(-3deg)}
 .sheet.two{inset:5% 10% 7% 4%; transform:rotate(2.4deg)}
@@ -103,6 +113,7 @@ h1 .under{box-shadow:inset 0 -0.28em 0 rgba(217,166,38,.45)}
   background:#EEEEF2; border:1px solid var(--line); padding:4px 10px; border-radius:999px}
 .stage-caption{position:absolute; bottom:-6px; font-family:var(--font-mono); font-size:.7rem; color:var(--muted); letter-spacing:.08em}
 
+/* ============ the generator (the actual tool) ============ */
 .tool{padding:34px 0 26px}
 .tool-card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden}
 .tool-head{background:var(--ink); color:#fff; padding:18px 26px; display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap}
@@ -120,6 +131,7 @@ input[type=text], select{
 input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; background:#fff}
 .hint{font-size:.82rem; color:var(--muted); margin-top:5px}
 
+/* premium markers + checkbox rows */
 .pro{display:inline-block; background:var(--brass); color:var(--ink);
   font-family:var(--font-mono); font-size:.6rem; font-weight:500; letter-spacing:.08em;
   padding:2px 8px; border-radius:999px; vertical-align:2px; margin-left:6px}
@@ -140,29 +152,20 @@ input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; back
 
 .tool-actions{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-top:6px}
 
+/* progress + result */
 .progress{display:none; margin-top:22px}
 .progress.show{display:block}
 .bar{height:12px; background:#E9E9EE; border-radius:999px; overflow:hidden; border:1px solid var(--line)}
 .bar i{display:block; height:100%; width:2%; background:linear-gradient(90deg,var(--brass),var(--brass-dark)); transition:width .5s ease}
 .progress p{margin-top:8px; font-family:var(--font-mono); font-size:.78rem; color:var(--ink-soft)}
-
 .result{display:none; margin-top:22px; background:#F2F8F3; border:1px solid #CBE3D2; border-radius:12px; padding:18px 20px}
 .result.show{display:block}
 .result h3{font-family:var(--font-display); font-size:1.1rem; margin-bottom:4px}
 .result p{font-size:.9rem; color:var(--ink-soft); margin-bottom:14px}
-
 .error{display:none; margin-top:18px; background:#FBF1EF; border:1px solid #E7C4BD; color:var(--bad); border-radius:12px; padding:14px 18px; font-size:.92rem}
 .error.show{display:block}
 
-.paywall{display:none; margin-top:14px; border:1px dashed var(--line); border-radius:12px; padding:14px 16px; background:#FFF9EC}
-.paywall.show{display:block}
-.paywall .row{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
-.paywall .buy{background:var(--brass); color:var(--ink); border-radius:9px; padding:10px 16px; text-decoration:none; font-weight:600}
-.paywall small{color:var(--muted)}
-
-.confirm{display:none; margin-top:12px; background:#F2F8F3; border:1px solid #CBE3D2; color:var(--ok); border-radius:10px; padding:10px 14px; font-size:.9rem}
-.confirm.show{display:block}
-
+/* ============ notes / faq ============ */
 .notes{padding:36px 0 56px}
 .notes h2{font-family:var(--font-display); font-weight:600; font-size:1.4rem; margin-bottom:18px}
 .notes-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
@@ -174,6 +177,7 @@ footer{background:var(--ink); color:#B9BEC9; padding:26px 0; font-size:.85rem}
 footer .wrap{display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap}
 footer b{color:#fff}
 
+/* ============ responsive + motion ============ */
 @media (max-width:860px){
   .hero .wrap{grid-template-columns:1fr; gap:40px}
   .stage{order:-1; min-height:340px}
@@ -189,6 +193,7 @@ footer b{color:#fff}
 </head>
 <body>
 
+<!-- ================= TOP BAR ================= -->
 <header class="topbar">
   <div class="wrap">
     <a class="brand" href="#"><span class="brand-mark">¶</span> CatalogPress</a>
@@ -199,6 +204,7 @@ footer b{color:#fff}
   </div>
 </header>
 
+<!-- ================= HERO ================= -->
 <section class="hero">
   <div class="wrap">
     <div>
@@ -221,6 +227,7 @@ footer b{color:#fff}
       </div>
     </div>
 
+    <!-- Signature element: a live catalog card cycling through discount tiers -->
     <div class="stage" aria-hidden="true">
       <div class="sheet"></div>
       <div class="sheet two"></div>
@@ -237,6 +244,7 @@ footer b{color:#fff}
   </div>
 </section>
 
+<!-- ================= THE GENERATOR ================= -->
 <section class="tool" id="generate">
   <div class="wrap">
     <div class="tool-card">
@@ -245,6 +253,10 @@ footer b{color:#fff}
         <span>CSV IN → PDF OUT</span>
       </div>
       <div class="tool-body">
+        <div class="result" id="keyBanner" style="margin-top:0;margin-bottom:20px">
+          <h3>Payment confirmed ✔</h3>
+          <p id="keyBannerMsg">Your license is active and saved on this device — generate away!</p>
+        </div>
         <form id="genForm">
 
           <div class="field">
@@ -281,16 +293,16 @@ footer b{color:#fff}
             <div class="field">
               <label for="currency">Currency</label>
               <select id="currency" name="currency">
-                <option value="£" selected>£ Pound</option>
-                <option value="$">$ Dollar</option>
-                <option value="€">€ Euro</option>
-                <option value="SAR ">SAR Saudi Riyal</option>
-                <option value="AED ">AED UAE Dirham</option>
-                <option value="Rs ">Rs Pakistani Rupee</option>
-                <option value="Rp ">Rp Indonesian Rupiah</option>
-                <option value="RM ">RM Malaysian Ringgit</option>
-                <option value="BDT ">BDT Bangladeshi Taka</option>
-                <option value="TL ">TL Turkish Lira</option>
+                <option value="£" selected>£ — British Pound</option>
+                <option value="$">$ — US Dollar</option>
+                <option value="€">€ — Euro</option>
+                <option value="SAR ">SAR — Saudi Riyal</option>
+                <option value="AED ">AED — UAE Dirham</option>
+                <option value="Rs ">Rs — Pakistani Rupee</option>
+                <option value="Rp ">Rp — Indonesian Rupiah</option>
+                <option value="RM ">RM — Malaysian Ringgit</option>
+                <option value="BDT ">BDT — Bangladeshi Taka</option>
+                <option value="TL ">TL — Turkish Lira</option>
               </select>
             </div>
           </div>
@@ -299,9 +311,10 @@ footer b{color:#fff}
             <div class="field">
               <label for="sections">Category sections <span class="pro">PRO</span></label>
               <input type="text" id="sections" name="sections" placeholder="e.g. Seerah, Quran, Kids">
-              <p class="hint">Write your own categories — each one becomes a divider page.
-                 Only products tagged with that word (or matching category/type) appear under it.
-                 Everything else goes into a final “More Products” section.</p>
+              <p class="hint">Write your own categories — e.g. <em>Seerah, Quran, Kids</em>. Each one
+                 becomes its own chapter with a divider page, and only products tagged with that
+                 name appear under it. Anything that doesn't match goes in a final
+                 “More Products” chapter. Leave blank for no chapters.</p>
             </div>
             <div class="field">
               <label for="layout">Products per page</label>
@@ -338,10 +351,9 @@ footer b{color:#fff}
                      style="font-size:.9rem">
             </div>
             <div class="field">
-              <label for="licenseKey">License key <small>(optional)</small></label>
-              <input type="text" id="licenseKey" name="license_key" placeholder="Auto-filled after payment">
-              <div class="confirm" id="confirmBox">Payment confirmed ✔ You’re unlocked.</div>
-              <div class="hint" id="pricingLinks"></div>
+              <label for="licenseKey">License key <small>(filled automatically after payment)</small></label>
+              <input type="text" id="licenseKey" name="license_key" placeholder="Appears here after you pay">
+              <p class="hint" id="buyHint"></p>
             </div>
           </div>
 
@@ -351,12 +363,8 @@ footer b{color:#fff}
           </div>
 
           <div class="error" id="errorBox" role="alert"></div>
-          <div class="paywall" id="paywallBox">
-            <div class="row">
-              <a class="buy" id="payBtn" href="#" target="_blank" rel="noopener">Unlock now</a>
-              <small>After payment you’ll return here automatically, unlocked.</small>
-            </div>
-          </div>
+          <a class="btn brass" id="payBtn" href="#" target="_blank" rel="noopener"
+             style="display:none;margin-top:14px">Unlock now →</a>
 
           <div class="progress" id="progressBox" aria-live="polite">
             <div class="bar"><i id="barFill"></i></div>
@@ -379,6 +387,7 @@ footer b{color:#fff}
   </div>
 </section>
 
+<!-- ================= NOTES ================= -->
 <section class="notes">
   <div class="wrap">
     <h2>Good to know</h2>
@@ -411,6 +420,11 @@ footer b{color:#fff}
 </footer>
 
 <script>
+/* =========================================================
+   All the browser-side logic. Plain JavaScript, no libraries.
+   ========================================================= */
+
+/* ---- 1. the hero card that cycles through discount tiers ---- */
 (function () {
   const badge = document.getElementById('mockBadge');
   const old   = document.getElementById('mockOld');
@@ -428,13 +442,14 @@ footer b{color:#fff}
   }
 
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    show(20);
+    show(20);                      // no animation: just show the point
   } else {
     show(0);
     setInterval(() => { i = (i + 1) % tiers.length; show(tiers[i]); }, 2400);
   }
 })();
 
+/* ---- 2. friendly file picker (click + drag & drop) ---- */
 const dropZone = document.getElementById('dropZone');
 const csvInput = document.getElementById('csvInput');
 const csvName  = document.getElementById('csvName');
@@ -455,6 +470,7 @@ function showFileName() {
   csvName.textContent = csvInput.files.length ? '✔ ' + csvInput.files[0].name : '';
 }
 
+/* ---- 3. submit → start job → poll progress → download ---- */
 const form        = document.getElementById('genForm');
 const goBtn       = document.getElementById('goBtn');
 const errorBox    = document.getElementById('errorBox');
@@ -465,50 +481,27 @@ const resultBox   = document.getElementById('resultBox');
 const resultMsg   = document.getElementById('resultMsg');
 const downloadBtn = document.getElementById('downloadBtn');
 const countHint   = document.getElementById('countHint');
-const paywallBox  = document.getElementById('paywallBox');
 const payBtn      = document.getElementById('payBtn');
 const licenseKey  = document.getElementById('licenseKey');
-const confirmBox  = document.getElementById('confirmBox');
-const pricingLinks= document.getElementById('pricingLinks');
 let pollTimer = null;
 
-function showError(msg) {
+function showError(msg, payUrl) {
   errorBox.textContent = msg;
   errorBox.classList.add('show');
   progressBox.classList.remove('show');
+  if (payUrl) { payBtn.href = payUrl; payBtn.style.display = 'inline-block'; }
+  else { payBtn.style.display = 'none'; }
   goBtn.disabled = false;
 }
 function resetUI() {
   clearInterval(pollTimer);
   errorBox.classList.remove('show');
+  payBtn.style.display = 'none';
   progressBox.classList.remove('show');
   resultBox.classList.remove('show');
-  paywallBox.classList.remove('show');
   countHint.textContent = '';
   barFill.style.width = '2%';
   goBtn.disabled = false;
-}
-
-async function loadPricingLinks() {
-  try {
-    const r = await fetch('/pricing');
-    const data = await r.json();
-    const parts = [];
-    if (data.basic) parts.push(`<a href="${data.basic}" target="_blank" rel="noopener">Buy Basic (£3)</a>`);
-    if (data.pro) parts.push(`<a href="${data.pro}" target="_blank" rel="noopener">Buy Pro (£7)</a>`);
-    pricingLinks.innerHTML = parts.length ? parts.join(' · ') : '';
-  } catch (e) { /* ignore */ }
-}
-
-function applyAutoKeyFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  const key = params.get('key');
-  if (key) {
-    licenseKey.value = key;
-    confirmBox.classList.add('show');
-    // clean the URL
-    window.history.replaceState({}, document.title, window.location.pathname + '#generate');
-  }
 }
 
 form.addEventListener('submit', async e => {
@@ -524,14 +517,7 @@ form.addEventListener('submit', async e => {
   try {
     const resp = await fetch('/generate', { method: 'POST', body: new FormData(form) });
     const data = await resp.json();
-    if (!resp.ok) {
-      showError(data.error || 'Something went wrong.');
-      if (data.upgrade && data.pay_url) {
-        payBtn.href = data.pay_url;
-        paywallBox.classList.add('show');
-      }
-      return;
-    }
+    if (!resp.ok) { showError(data.error || 'Something went wrong.', data.pay_url); return; }
 
     countHint.textContent =
       `Found ${data.products} products — building ${data.variants} catalog version${data.variants > 1 ? 's' : ''}.`;
@@ -565,7 +551,7 @@ function poll(jobId) {
         clearInterval(pollTimer);
         showError(data.message || 'The job failed. Please try again.');
       }
-    } catch (err) { /* one missed poll is fine */ }
+    } catch (err) { /* one missed poll is fine — try again next tick */ }
   }, 1500);
 }
 
@@ -576,8 +562,48 @@ document.getElementById('againBtn').addEventListener('click', () => {
   window.scrollTo({ top: document.getElementById('generate').offsetTop - 20, behavior: 'smooth' });
 });
 
-loadPricingLinks();
-applyAutoKeyFromUrl();
+/* ---- 4. automatic payments ----
+   After paying on Stripe, the customer lands back here with their
+   receipt code in the address (?key=cs_...). We put it in the license
+   box, save it in this browser so it survives future visits, and show
+   a green confirmation. The server verifies it with Stripe on every
+   generate - nobody can fake a paid receipt. */
+(function () {
+  const banner = document.getElementById('keyBanner');
+  const params = new URLSearchParams(window.location.search);
+  const fromStripe = params.get('key');
+
+  if (fromStripe) {
+    licenseKey.value = fromStripe;
+    try { localStorage.setItem('cp_license', fromStripe); } catch (e) {}
+    banner.classList.add('show');
+    document.getElementById('generate').scrollIntoView();
+    // tidy the address bar so the long code doesn't get bookmarked
+    history.replaceState({}, '', '/');
+  } else {
+    try {
+      const saved = localStorage.getItem('cp_license');
+      if (saved) licenseKey.value = saved;
+    } catch (e) {}
+  }
+
+  // remember manually-typed keys too
+  licenseKey.addEventListener('change', () => {
+    try { localStorage.setItem('cp_license', licenseKey.value.trim()); } catch (e) {}
+  });
+
+  // show Basic / Pro buy links under the license box, if configured
+  fetch('/pricing').then(r => r.json()).then(p => {
+    const links = [];
+    if (p.basic) links.push(`<a href="${p.basic}" target="_blank" rel="noopener">Basic — £3</a>`);
+    if (p.pro)   links.push(`<a href="${p.pro}" target="_blank" rel="noopener">Pro — £7</a>`);
+    if (links.length) {
+      document.getElementById('buyHint').innerHTML =
+        'No license yet? ' + links.join(' · ') +
+        ' — you\'ll be brought straight back, unlocked.';
+    }
+  }).catch(() => {});
+})();
 </script>
 </body>
 </html>
