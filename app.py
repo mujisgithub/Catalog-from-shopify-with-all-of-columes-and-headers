@@ -16,17 +16,13 @@ How one visit flows through this file:
   3. asks every 1.5 sec  ->     "/status/id" replies {percent, message}
   4. job finishes        ->     "/download/id" sends the PDF or ZIP
 
-Why the background-job dance instead of just replying with the PDF?
-Because downloading 300 product photos can take a minute or two, and
-web requests that run that long get cut off by hosting providers.
-This pattern (start job -> poll -> download) is the standard fix and
-it also gives your customers a nice live progress bar.
-
-MAKING MONEY (automatic):
-  Set STRIPE_SECRET_KEY plus PAY_LINK_BASIC / PAY_LINK_PRO in your host's
-  environment and the paywall switches on. Customers pay through your
-  Stripe Payment Link, come straight back, and are unlocked automatically -
-  their Stripe receipt is verified server-side and becomes their license.
+MAKING MONEY (automatic, single tier):
+  Set STRIPE_SECRET_KEY plus PAY_LINK_PRO (or PAY_LINK_BASIC / PAY_LINK)
+  in your host's environment and the paywall switches on. One payment,
+  any price, unlocks unlimited products and every premium feature.
+  Customers pay through your Stripe Payment Link, come straight back,
+  and are unlocked automatically - their Stripe receipt is verified
+  server-side and becomes their license.
 """
 
 import os
@@ -129,21 +125,17 @@ def _keys(env_name):
 
 
 def key_tier(key):
-    """Which tier does this license key unlock?
-      'pro'   - keys listed in LICENSE_KEYS_PRO (or the old LICENSE_KEYS),
-                or a verified Stripe payment at the Pro price / subscription
-      'basic' - keys listed in LICENSE_KEYS_BASIC, or a verified Stripe
-                payment at the Basic price
-      None    - no valid key (free tier)
+    """One tier now: is this key valid or not?
+      'pro'  - listed in LICENSE_KEYS_PRO/LICENSE_KEYS_BASIC/LICENSE_KEYS,
+               or a verified Stripe payment (any amount) / active subscription
+      None   - no valid key (free tier)
     Keys starting with cs_ are Stripe checkout receipts and get verified
     with Stripe automatically - no manual work for you at all."""
     key = (key or "").strip()
     if not key or key in _keys("BLOCKED_KEYS"):    # refunds: block a key here
         return None
-    if key in (_keys("LICENSE_KEYS_PRO") | _keys("LICENSE_KEYS")):
+    if key in (_keys("LICENSE_KEYS_PRO") | _keys("LICENSE_KEYS_BASIC") | _keys("LICENSE_KEYS")):
         return "pro"
-    if key in _keys("LICENSE_KEYS_BASIC"):
-        return "basic"
     if key.startswith("cs_"):
         return stripe_session_tier(key)
     return None
@@ -197,12 +189,8 @@ def stripe_session_tier(session_id):
             if r2.status_code != 200 or r2.json().get("status") not in ("active", "trialing"):
                 _VERIFIED.pop(session_id, None)
                 return None
-            tier = "pro"
-        else:
-            # One-off payments: £7+ is Pro, under that is Basic.
-            # (Amounts are in pence; change PRO_PRICE_PENCE if you reprice.)
-            pro_pence = int(os.environ.get("PRO_PRICE_PENCE", "700"))
-            tier = "pro" if (session.get("amount_total") or 0) >= pro_pence else "basic"
+        # One tier now: any successful payment (any price) unlocks everything.
+        tier = "pro"
 
         _VERIFIED[session_id] = (tier, now, is_sub)
         return tier
@@ -309,10 +297,11 @@ def thanks():
 
 @app.route("/pricing")
 def pricing():
-    """Tells the page which payment links exist, so it can show
-    Basic / Pro buy links under the license key box."""
-    return jsonify(basic=os.environ.get("PAY_LINK_BASIC", "").strip(),
-                   pro=os.environ.get("PAY_LINK_PRO", "").strip())
+    """Tells the page which payment link to show under the license box."""
+    link = (os.environ.get("PAY_LINK_PRO", "").strip()
+           or os.environ.get("PAY_LINK_BASIC", "").strip()
+           or os.environ.get("PAY_LINK", "").strip())
+    return jsonify(buy=link)
 
 
 @app.route("/generate", methods=["POST"])
@@ -382,11 +371,7 @@ def generate():
         return jsonify(error=f"That's {len(items)} products — the limit is "
                              f"{MAX_PRODUCTS} per catalog."), 400
 
-    # ---- 4. the paywall -----------------------------------------------
-    # Two tiers, paid through your Stripe links and verified automatically:
-    #   BASIC (£3 one-off)         -> unlimited products, no branding
-    #   PRO   (£7 or subscription) -> everything: unlimited products,
-    #                                 all premium features, no branding
+    # ---- 4. the paywall (single tier: any valid key/payment = full access)
     tier = key_tier(request.form.get("license_key", ""))
     wall = paywall_on()
     limit = free_limit()
@@ -401,34 +386,30 @@ def generate():
     if show_stock:
         premium_used.append("stock counts")
 
-    pay_basic = os.environ.get("PAY_LINK_BASIC", "").strip()
-    pay_pro = os.environ.get("PAY_LINK_PRO", "").strip()
+    # One purchase link now (checked in this order so old BASIC/PRO setups
+    # keep working without changes): PAY_LINK_PRO, then PAY_LINK_BASIC,
+    # then a plain PAY_LINK if you ever rename it.
+    pay_link = (os.environ.get("PAY_LINK_PRO", "").strip()
+               or os.environ.get("PAY_LINK_BASIC", "").strip()
+               or os.environ.get("PAY_LINK", "").strip())
 
     if wall and limit and len(items) > limit and tier is None:
         shutil.rmtree(job_dir, ignore_errors=True)
         return jsonify(error=f"The free plan covers up to {limit} products and "
-                             f"your file has {len(items)}. Unlock unlimited "
-                             "products for £3 one-off — or go Pro for £7 to get "
-                             "every premium feature too. Payment takes under a "
-                             "minute and you'll be brought straight back here, "
-                             "unlocked automatically.",
-                       upgrade=True,
-                       pay_url=(pay_pro if premium_used else pay_basic)
-                               or pay_basic or pay_pro), 402
+                             f"your file has {len(items)}. Buy a license key for "
+                             "full access — payment takes under a minute and "
+                             "you'll be brought straight back here, unlocked "
+                             "automatically.",
+                       upgrade=True, pay_url=pay_link), 402
 
-    if wall and premium_used and tier != "pro":
+    if wall and premium_used and tier is None:
         shutil.rmtree(job_dir, ignore_errors=True)
-        if tier == "basic":
-            msg = ("Your key unlocks unlimited products, but these are Pro "
-                   "features: " + ", ".join(premium_used)
-                   + ". Upgrade to Pro (£7) to use them — you'll be brought "
-                     "straight back and unlocked automatically.")
-        else:
-            msg = ("These are Pro features: " + ", ".join(premium_used)
-                   + ". Go Pro for £7 one-off — payment takes under a minute "
-                     "and you'll be brought straight back here, unlocked "
-                     "automatically.")
-        return jsonify(error=msg, upgrade=True, pay_url=pay_pro), 402
+        return jsonify(error="These are premium features: "
+                             + ", ".join(premium_used)
+                             + ". Buy a license key for full access — payment "
+                               "takes under a minute and you'll be brought "
+                               "straight back here, unlocked automatically.",
+                       upgrade=True, pay_url=pay_link), 402
 
     # Free catalogs carry a small clickable footer back to this site -
     # every shared PDF advertises you. Any paying customer gets clean PDFs.
