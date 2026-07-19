@@ -560,18 +560,14 @@ document.getElementById('againBtn').addEventListener('click', () => {
     try { localStorage.setItem('cp_license', licenseKey.value.trim()); } catch (e) {}
   });
 
-  fetch('/pricing').then(r => r.json()).then(p => {
-    const links = [];
-    if (p.basic) links.push(`<a href="${p.basic}" target="_blank" rel="noopener">Basic — £3</a>`);
-    if (p.pro)   links.push(`<a href="${p.pro}" target="_blank" rel="noopener">Pro — £7</a>`);
-    if (links.length) {
+   fetch('/pricing').then(r => r.json()).then(p => {
+    if (p.buy) {
       document.getElementById('buyBannerText').innerHTML =
-        'No license yet? ' + links.join(' &nbsp;·&nbsp; ') +
-        ' — pay in under a minute and you\'ll be brought straight back, unlocked automatically.';
+        `Need full features? <a href="${p.buy}" target="_blank" rel="noopener">Buy a license key here</a> ` +
+        `— pay in under a minute and you'll be brought straight back, unlocked automatically.`;
       document.getElementById('buyBanner').classList.add('show');
     }
   }).catch(() => {});
-})();
 </script>
 </body>
 </html>
