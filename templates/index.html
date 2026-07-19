@@ -12,11 +12,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 
 <style>
-/* =========================================================
-   Design tokens — the whole site is built from these.
-   They deliberately match the PDF the tool produces:
-   ink #1A1F29 header bar, brass #D9A626 accent, zinc paper.
-   ========================================================= */
 :root{
   --paper:#F4F4F1;
   --card:#FFFFFF;
@@ -49,7 +44,6 @@ a{color:inherit}
 
 .wrap{max-width:1060px; margin:0 auto; padding:0 22px}
 
-/* ============ top bar — same ink bar as the PDF header ============ */
 .topbar{background:var(--ink); color:#fff}
 .topbar .wrap{display:flex; align-items:center; justify-content:space-between; height:60px}
 .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:800; font-size:1.1rem; letter-spacing:.2px; text-decoration:none}
@@ -57,7 +51,6 @@ a{color:inherit}
 .topbar nav a{color:#E7E9EE; text-decoration:none; font-size:.92rem; margin-left:22px}
 .topbar nav a:hover{color:#fff; text-decoration:underline; text-underline-offset:4px}
 
-/* ============ hero ============ */
 .hero{padding:64px 0 40px}
 .hero .wrap{display:grid; grid-template-columns:1.15fr .85fr; gap:48px; align-items:center}
 .kicker{font-family:var(--font-mono); font-size:.78rem; letter-spacing:.14em; text-transform:uppercase; color:var(--brass-dark)}
@@ -78,13 +71,11 @@ h1 .under{box-shadow:inset 0 -0.28em 0 rgba(217,166,38,.45)}
 .btn[disabled]{opacity:.55; cursor:not-allowed; transform:none}
 .hero-note{font-size:.9rem; color:var(--muted)}
 
-/* the three real steps */
 .steps{margin-top:38px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
 .step{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
 .step b{display:block; font-family:var(--font-mono); font-size:.72rem; letter-spacing:.12em; color:var(--brass-dark); margin-bottom:6px}
 .step span{font-size:.9rem; color:var(--ink-soft)}
 
-/* ============ signature: a live catalog card with cycling discounts ============ */
 .stage{position:relative; display:grid; place-items:center; padding:10px 0}
 .sheet{position:absolute; inset:8% 6% 4% 10%; background:#fff; border:1px solid var(--line); border-radius:16px; transform:rotate(-3deg)}
 .sheet.two{inset:5% 10% 7% 4%; transform:rotate(2.4deg)}
@@ -113,7 +104,6 @@ h1 .under{box-shadow:inset 0 -0.28em 0 rgba(217,166,38,.45)}
   background:#EEEEF2; border:1px solid var(--line); padding:4px 10px; border-radius:999px}
 .stage-caption{position:absolute; bottom:-6px; font-family:var(--font-mono); font-size:.7rem; color:var(--muted); letter-spacing:.08em}
 
-/* ============ the generator (the actual tool) ============ */
 .tool{padding:34px 0 26px}
 .tool-card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden}
 .tool-head{background:var(--ink); color:#fff; padding:18px 26px; display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap}
@@ -131,7 +121,6 @@ input[type=text], select{
 input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; background:#fff}
 .hint{font-size:.82rem; color:var(--muted); margin-top:5px}
 
-/* premium markers + checkbox rows */
 .pro{display:inline-block; background:var(--brass); color:var(--ink);
   font-family:var(--font-mono); font-size:.6rem; font-weight:500; letter-spacing:.08em;
   padding:2px 8px; border-radius:999px; vertical-align:2px; margin-left:6px}
@@ -140,6 +129,14 @@ input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; back
 .checkline input{width:18px; height:18px; accent-color:var(--brass); cursor:pointer; flex-shrink:0}
 .checkline span{font-size:.92rem; font-weight:600}
 .checkline small{display:block; font-weight:400; font-size:.8rem; color:var(--muted)}
+
+.buy-banner{display:none; align-items:center; gap:10px; margin-top:8px; padding:14px 16px;
+  background:#FDF6E3; border:1.5px solid var(--brass); border-radius:10px;
+  font-size:1rem; color:var(--ink); line-height:1.5}
+.buy-banner.show{display:flex}
+.buy-banner .icon{font-size:1.3rem; flex-shrink:0}
+.buy-banner a{font-weight:700; color:var(--brass-dark); text-decoration:underline; text-underline-offset:3px}
+.buy-banner a:hover{color:var(--ink)}
 
 .drop{
   border:2px dashed var(--line); border-radius:12px; background:#FBFBFC;
@@ -152,7 +149,6 @@ input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; back
 
 .tool-actions{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-top:6px}
 
-/* progress + result */
 .progress{display:none; margin-top:22px}
 .progress.show{display:block}
 .bar{height:12px; background:#E9E9EE; border-radius:999px; overflow:hidden; border:1px solid var(--line)}
@@ -165,7 +161,6 @@ input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; back
 .error{display:none; margin-top:18px; background:#FBF1EF; border:1px solid #E7C4BD; color:var(--bad); border-radius:12px; padding:14px 18px; font-size:.92rem}
 .error.show{display:block}
 
-/* ============ notes / faq ============ */
 .notes{padding:36px 0 56px}
 .notes h2{font-family:var(--font-display); font-weight:600; font-size:1.4rem; margin-bottom:18px}
 .notes-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
@@ -177,7 +172,6 @@ footer{background:var(--ink); color:#B9BEC9; padding:26px 0; font-size:.85rem}
 footer .wrap{display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap}
 footer b{color:#fff}
 
-/* ============ responsive + motion ============ */
 @media (max-width:860px){
   .hero .wrap{grid-template-columns:1fr; gap:40px}
   .stage{order:-1; min-height:340px}
@@ -193,7 +187,6 @@ footer b{color:#fff}
 </head>
 <body>
 
-<!-- ================= TOP BAR ================= -->
 <header class="topbar">
   <div class="wrap">
     <a class="brand" href="#"><span class="brand-mark">¶</span> CatalogPress</a>
@@ -204,7 +197,6 @@ footer b{color:#fff}
   </div>
 </header>
 
-<!-- ================= HERO ================= -->
 <section class="hero">
   <div class="wrap">
     <div>
@@ -227,7 +219,6 @@ footer b{color:#fff}
       </div>
     </div>
 
-    <!-- Signature element: a live catalog card cycling through discount tiers -->
     <div class="stage" aria-hidden="true">
       <div class="sheet"></div>
       <div class="sheet two"></div>
@@ -244,7 +235,6 @@ footer b{color:#fff}
   </div>
 </section>
 
-<!-- ================= THE GENERATOR ================= -->
 <section class="tool" id="generate">
   <div class="wrap">
     <div class="tool-card">
@@ -320,28 +310,18 @@ footer b{color:#fff}
               <label for="layout">Products per page</label>
               <select id="layout" name="layout">
                 <option value="12" selected>12 — Standard</option>
-                <option value="20">20 — Compact (PRO)</option>
                 <option value="30">30 — Dense price list (PRO)</option>
               </select>
               <p class="hint">Compact layouts fit big ranges into fewer pages.</p>
             </div>
           </div>
 
-          <div class="grid2">
-            <div class="field">
-              <label class="checkline" for="compareAt">
-                <input type="checkbox" id="compareAt" name="compare_at">
-                <span>Show compare-at prices <span class="pro">PRO</span>
-                  <small>Your store's “was” price appears crossed out above the price badge.</small></span>
-              </label>
-            </div>
-            <div class="field">
-              <label class="checkline" for="showStock">
-                <input type="checkbox" id="showStock" name="show_stock">
-                <span>Show stock counts <span class="pro">PRO</span>
-                  <small>Adds “12 in stock” to each card that has inventory.</small></span>
-              </label>
-            </div>
+          <div class="field">
+            <label class="checkline" for="showStock">
+              <input type="checkbox" id="showStock" name="show_stock">
+              <span>Show stock counts <span class="pro">PRO</span>
+                <small>Adds “12 in stock” to each card — only appears where your Shopify export includes inventory numbers.</small></span>
+            </label>
           </div>
 
           <div class="grid2">
@@ -353,7 +333,11 @@ footer b{color:#fff}
             <div class="field">
               <label for="licenseKey">License key <small>(filled automatically after payment)</small></label>
               <input type="text" id="licenseKey" name="license_key" placeholder="Appears here after you pay">
-              <p class="hint" id="buyHint"></p>
+              <p class="hint">Filled in automatically the moment you pay.</p>
+              <div class="buy-banner" id="buyBanner">
+                <span class="icon">🔓</span>
+                <span id="buyBannerText"></span>
+              </div>
             </div>
           </div>
 
@@ -387,7 +371,6 @@ footer b{color:#fff}
   </div>
 </section>
 
-<!-- ================= NOTES ================= -->
 <section class="notes">
   <div class="wrap">
     <h2>Good to know</h2>
@@ -420,11 +403,6 @@ footer b{color:#fff}
 </footer>
 
 <script>
-/* =========================================================
-   All the browser-side logic. Plain JavaScript, no libraries.
-   ========================================================= */
-
-/* ---- 1. the hero card that cycles through discount tiers ---- */
 (function () {
   const badge = document.getElementById('mockBadge');
   const old   = document.getElementById('mockOld');
@@ -442,14 +420,13 @@ footer b{color:#fff}
   }
 
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    show(20);                      // no animation: just show the point
+    show(20);
   } else {
     show(0);
     setInterval(() => { i = (i + 1) % tiers.length; show(tiers[i]); }, 2400);
   }
 })();
 
-/* ---- 2. friendly file picker (click + drag & drop) ---- */
 const dropZone = document.getElementById('dropZone');
 const csvInput = document.getElementById('csvInput');
 const csvName  = document.getElementById('csvName');
@@ -470,7 +447,6 @@ function showFileName() {
   csvName.textContent = csvInput.files.length ? '✔ ' + csvInput.files[0].name : '';
 }
 
-/* ---- 3. submit → start job → poll progress → download ---- */
 const form        = document.getElementById('genForm');
 const goBtn       = document.getElementById('goBtn');
 const errorBox    = document.getElementById('errorBox');
@@ -562,12 +538,6 @@ document.getElementById('againBtn').addEventListener('click', () => {
   window.scrollTo({ top: document.getElementById('generate').offsetTop - 20, behavior: 'smooth' });
 });
 
-/* ---- 4. automatic payments ----
-   After paying on Stripe, the customer lands back here with their
-   receipt code in the address (?key=cs_...). We put it in the license
-   box, save it in this browser so it survives future visits, and show
-   a green confirmation. The server verifies it with Stripe on every
-   generate - nobody can fake a paid receipt. */
 (function () {
   const banner = document.getElementById('keyBanner');
   const params = new URLSearchParams(window.location.search);
@@ -578,7 +548,6 @@ document.getElementById('againBtn').addEventListener('click', () => {
     try { localStorage.setItem('cp_license', fromStripe); } catch (e) {}
     banner.classList.add('show');
     document.getElementById('generate').scrollIntoView();
-    // tidy the address bar so the long code doesn't get bookmarked
     history.replaceState({}, '', '/');
   } else {
     try {
@@ -587,20 +556,19 @@ document.getElementById('againBtn').addEventListener('click', () => {
     } catch (e) {}
   }
 
-  // remember manually-typed keys too
   licenseKey.addEventListener('change', () => {
     try { localStorage.setItem('cp_license', licenseKey.value.trim()); } catch (e) {}
   });
 
-  // show Basic / Pro buy links under the license box, if configured
   fetch('/pricing').then(r => r.json()).then(p => {
     const links = [];
     if (p.basic) links.push(`<a href="${p.basic}" target="_blank" rel="noopener">Basic — £3</a>`);
     if (p.pro)   links.push(`<a href="${p.pro}" target="_blank" rel="noopener">Pro — £7</a>`);
     if (links.length) {
-      document.getElementById('buyHint').innerHTML =
-        'No license yet? ' + links.join(' · ') +
-        ' — you\'ll be brought straight back, unlocked.';
+      document.getElementById('buyBannerText').innerHTML =
+        'No license yet? ' + links.join(' &nbsp;·&nbsp; ') +
+        ' — pay in under a minute and you\'ll be brought straight back, unlocked automatically.';
+      document.getElementById('buyBanner').classList.add('show');
     }
   }).catch(() => {});
 })();
