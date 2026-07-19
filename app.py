@@ -1,466 +1,574 @@
-"""
-app.py
-======
-The web server. This is what "the backend" means: a small program that
-sits on a computer in the cloud, receives the customer's CSV file,
-runs catalog_maker.py, and hands back the finished PDF.
-
-How one visit flows through this file:
-
-  Browser                       This server
-  -------                       -----------
-  1. opens the site      ->     "/"          sends templates/index.html
-  2. submits the form    ->     "/generate"  saves the CSV, starts a
-                                             background job, replies
-                                             instantly with a job id
-  3. asks every 1.5 sec  ->     "/status/id" replies {percent, message}
-  4. job finishes        ->     "/download/id" sends the PDF or ZIP
-
-MAKING MONEY (automatic, single tier):
-  Set STRIPE_SECRET_KEY plus PAY_LINK_PRO (or PAY_LINK_BASIC / PAY_LINK)
-  in your host's environment and the paywall switches on. One payment,
-  any price, unlocks unlimited products and every premium feature.
-  Customers pay through your Stripe Payment Link, come straight back,
-  and are unlocked automatically - their Stripe receipt is verified
-  server-side and becomes their license.
-"""
-
-import os
-import re
-import time
-import uuid
-import shutil
-import threading
-
-import requests
-from flask import Flask, request, jsonify, send_file, redirect
-from werkzeug.utils import secure_filename
-
-from catalog_maker import load_products, build_catalogs
-
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024   # refuse uploads over 25 MB
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-JOBS_DIR = os.path.join(BASE_DIR, "jobs")
-os.makedirs(JOBS_DIR, exist_ok=True)
-
-MAX_PRODUCTS = 3000          # hard ceiling so one giant file can't jam the server
-JOB_MAX_AGE_SECONDS = 2 * 60 * 60   # delete job files after 2 hours
-
-# All running/finished jobs live in this dictionary while the server runs.
-# job_id -> {"status", "percent", "message", "result", "download_name", "created"}
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-
-
-# ----------------------------------------------------------
-# Housekeeping: delete old job folders so the disk stays clean
-# ----------------------------------------------------------
-def cleanup_old_jobs():
-    now = time.time()
-    with JOBS_LOCK:
-        stale = [jid for jid, j in JOBS.items()
-                 if now - j["created"] > JOB_MAX_AGE_SECONDS]
-        for jid in stale:
-            JOBS.pop(jid, None)
-    for name in os.listdir(JOBS_DIR):
-        path = os.path.join(JOBS_DIR, name)
-        try:
-            if now - os.path.getmtime(path) > JOB_MAX_AGE_SECONDS:
-                shutil.rmtree(path, ignore_errors=True)
-        except OSError:
-            pass
-
-
-# ----------------------------------------------------------
-# Reading the form safely
-# ----------------------------------------------------------
-def parse_discounts(raw):
-    """'0, 10, 20' -> [0.0, 10.0, 20.0]. Empty -> [0]. Max 5 levels."""
-    values = []
-    for part in re.split(r"[,\s]+", (raw or "").strip()):
-        if not part:
-            continue
-        try:
-            d = float(part.replace("%", ""))
-        except ValueError:
-            raise ValueError(f"'{part}' isn't a number. Use e.g. 0, 10, 20")
-        if not 0 <= d <= 90:
-            raise ValueError("Discounts must be between 0 and 90.")
-        if d not in values:
-            values.append(d)
-    if not values:
-        values = [0.0]
-    if len(values) > 5:
-        raise ValueError("Maximum 5 discount levels per run.")
-    return sorted(values)
-
-
-def parse_sections(raw):
-    """'Seerah, Quran, Kids' -> ['Seerah', 'Quran', 'Kids']. Premium."""
-    names = []
-    for part in (raw or "").split(","):
-        p = part.strip()[:40]
-        if p and p.lower() not in [n.lower() for n in names]:
-            names.append(p)
-    if len(names) > 12:
-        raise ValueError("Maximum 12 category sections per catalog.")
-    return names
-
-
-def clean_store_url(raw):
-    url = (raw or "").strip().rstrip("/")
-    if not url:
-        return ""
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    if not re.match(r"^https?://[A-Za-z0-9.\-]+(\.[A-Za-z]{2,})(:\d+)?$", url):
-        raise ValueError("Store URL should look like: https://yourstore.com")
-    return url
-
-
-def _keys(env_name):
-    return {k.strip() for k in os.environ.get(env_name, "").split(",") if k.strip()}
-
-
-def key_tier(key):
-    """One tier now: is this key valid or not?
-      'pro'  - listed in LICENSE_KEYS_PRO/LICENSE_KEYS_BASIC/LICENSE_KEYS,
-               or a verified Stripe payment (any amount) / active subscription
-      None   - no valid key (free tier)
-    Keys starting with cs_ are Stripe checkout receipts and get verified
-    with Stripe automatically - no manual work for you at all."""
-    key = (key or "").strip()
-    if not key or key in _keys("BLOCKED_KEYS"):    # refunds: block a key here
-        return None
-    if key in (_keys("LICENSE_KEYS_PRO") | _keys("LICENSE_KEYS_BASIC") | _keys("LICENSE_KEYS")):
-        return "pro"
-    if key.startswith("cs_"):
-        return stripe_session_tier(key)
-    return None
-
-
-# ----------------------------------------------------------
-# AUTOMATIC payments: verifying Stripe receipts
-# ----------------------------------------------------------
-# When a customer pays through your Stripe Payment Link, Stripe sends them
-# back to /thanks with a "checkout session id" (cs_...). That id IS their
-# license key: we ask Stripe's servers directly whether it was really paid
-# (nobody can fake that - it needs your SECRET key, which lives only in
-# Render's Environment as STRIPE_SECRET_KEY, never in this code).
-#
-# Verified keys are remembered in memory so we don't ask Stripe on every
-# click. Subscriptions are re-checked once a day, so cancelled subscribers
-# lose access automatically.
-_VERIFIED = {}          # session_id -> (tier, checked_at, is_subscription)
-_SUB_RECHECK_SECONDS = 24 * 60 * 60
-
-
-def stripe_session_tier(session_id):
-    if not re.fullmatch(r"cs_[A-Za-z0-9_]+", session_id or ""):
-        return None
-    now = time.time()
-    cached = _VERIFIED.get(session_id)
-    if cached:
-        tier, checked_at, is_sub = cached
-        if not is_sub or now - checked_at < _SUB_RECHECK_SECONDS:
-            return tier
-
-    secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
-    if not secret:
-        return None
-    try:
-        r = requests.get(
-            "https://api.stripe.com/v1/checkout/sessions/" + session_id,
-            auth=(secret, ""), timeout=15)
-        if r.status_code != 200:
-            return None
-        session = r.json()
-        if session.get("payment_status") != "paid":
-            return None
-
-        is_sub = session.get("mode") == "subscription"
-        if is_sub:
-            # Subscribers keep access only while the subscription is alive
-            sub_id = session.get("subscription")
-            r2 = requests.get("https://api.stripe.com/v1/subscriptions/" + str(sub_id),
-                              auth=(secret, ""), timeout=15)
-            if r2.status_code != 200 or r2.json().get("status") not in ("active", "trialing"):
-                _VERIFIED.pop(session_id, None)
-                return None
-        # One tier now: any successful payment (any price) unlocks everything.
-        tier = "pro"
-
-        _VERIFIED[session_id] = (tier, now, is_sub)
-        return tier
-    except Exception:                              # noqa: BLE001
-        # Network hiccup talking to Stripe: honour a previous verification
-        return cached[0] if cached else None
-
-
-def paywall_on():
-    """The paywall switches on when key lists are configured OR Stripe
-    automatic payments are connected (STRIPE_SECRET_KEY is set)."""
-    return bool(_keys("LICENSE_KEYS") or _keys("LICENSE_KEYS_BASIC")
-                or _keys("LICENSE_KEYS_PRO")
-                or os.environ.get("STRIPE_SECRET_KEY", "").strip())
-
-
-def free_limit():
-    try:
-        return int(os.environ.get("FREE_PRODUCT_LIMIT", "25"))
-    except ValueError:
-        return 25
-
-
-# ----------------------------------------------------------
-# The background worker
-# ----------------------------------------------------------
-def run_job(job_id, items, job_dir, options):
-    def set_progress(pct, msg):
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job:
-                job["percent"] = int(round(pct * 100))
-                if msg:
-                    job["message"] = msg
-
-    try:
-        result_path, _pdfs = build_catalogs(
-            items, job_dir,
-            business_name=options["business_name"],
-            discounts=options["discounts"],
-            currency=options["currency"],
-            logo_path=options["logo_path"],
-            layout=options.get("layout", "12"),
-            section_names=options.get("section_names"),
-            use_compare_at=options.get("use_compare_at", False),
-            show_stock=options.get("show_stock", False),
-            branding_text=options.get("branding_text", ""),
-            branding_url=options.get("branding_url", ""),
-            progress=set_progress,
-        )
-        with JOBS_LOCK:
-            JOBS[job_id].update(
-                status="done", percent=100, message="Your catalog is ready",
-                result=result_path,
-                download_name=os.path.basename(result_path),
-            )
-    except Exception as exc:                      # noqa: BLE001
-        app.logger.exception("Job %s failed", job_id)
-        with JOBS_LOCK:
-            JOBS[job_id].update(
-                status="error", message=f"Something went wrong: {exc}")
-
-
-# ----------------------------------------------------------
-# Routes (the URLs the browser talks to)
-# ----------------------------------------------------------
-@app.route("/")
-def index():
-    # The page is plain HTML (no template variables), so we serve the file
-    # directly - and we accept it living either in templates/ or right next
-    # to app.py. That makes the site immune to the file landing in the
-    # "wrong" folder during a GitHub upload.
-    for candidate in (os.path.join(BASE_DIR, "templates", "index.html"),
-                      os.path.join(BASE_DIR, "index.html")):
-        if os.path.exists(candidate):
-            with open(candidate, encoding="utf-8") as f:
-                return f.read()
-    return ("<h1>Almost there</h1><p>index.html is missing from the "
-            "deployment. Upload it to your GitHub repository (ideally "
-            "inside the templates folder) and Render will redeploy.</p>"), 500
-
-
-@app.route("/thanks")
-def thanks():
-    """Stripe sends customers here after a successful payment, with their
-    checkout receipt in the address. We verify it really was paid, then
-    send them back to the homepage where the page auto-fills their key
-    and unlocks everything - no manual steps for anyone."""
-    session_id = request.args.get("session_id", "").strip()
-    tier = stripe_session_tier(session_id) if session_id else None
-    if tier:
-        return redirect(f"/?key={session_id}&tier={tier}")
-    return ("""<!DOCTYPE html><html><head><meta charset="utf-8">
-        <meta http-equiv="refresh" content="4">
-        <title>Confirming your payment…</title>
-        <style>body{font-family:sans-serif;background:#F4F4F1;color:#1A1F29;
-        display:grid;place-items:center;min-height:90vh;text-align:center}</style>
-        </head><body><div><h2>Confirming your payment…</h2>
-        <p>This page checks again every few seconds.<br>
-        If it doesn't confirm within a minute, go back to the site and
-        try generating - or contact us with your Stripe receipt email.</p>
-        <p><a href="/">Back to CatalogPress</a></p></div></body></html>"""), 202
-
-
-@app.route("/pricing")
-def pricing():
-    """Tells the page which payment link to show under the license box."""
-    link = (os.environ.get("PAY_LINK_PRO", "").strip()
-           or os.environ.get("PAY_LINK_BASIC", "").strip()
-           or os.environ.get("PAY_LINK", "").strip())
-    return jsonify(buy=link)
-
-
-@app.route("/generate", methods=["POST"])
-def generate():
-    cleanup_old_jobs()
-
-    # ---- 1. validate everything the user typed -----------------------
-    csv_file = request.files.get("csv")
-    if not csv_file or not csv_file.filename.lower().endswith(".csv"):
-        return jsonify(error="Please choose your Shopify CSV export (a .csv file)."), 400
-
-    business_name = (request.form.get("business_name") or "").strip()[:60]
-    if not business_name:
-        return jsonify(error="Please enter your business or catalog name."), 400
-
-    try:
-        store_url = clean_store_url(request.form.get("store_url"))
-        discounts = parse_discounts(request.form.get("discounts"))
-        section_names = parse_sections(request.form.get("sections"))
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-
-    # PDF fonts can only draw Western characters, so currencies whose symbol
-    # needs special glyphs (like the rupee or riyal signs) use their standard
-    # letter codes instead - that's normal on trade price lists anyway.
-    currency = request.form.get("currency", "£")
-    if currency not in ("£", "$", "€", "SAR ", "AED ", "Rs ", "Rp ",
-                        "RM ", "BDT ", "TL "):
-        currency = "£"
-
-    layout = request.form.get("layout", "12")
-    if layout not in ("12", "20", "30"):
-        layout = "12"
-    use_compare_at = request.form.get("compare_at") == "on"
-    show_stock = request.form.get("show_stock") == "on"
-
-    # ---- 2. save the uploads into this job's private folder ----------
-    job_id = uuid.uuid4().hex
-    job_dir = os.path.join(JOBS_DIR, job_id)
-    os.makedirs(job_dir, exist_ok=True)
-
-    csv_path = os.path.join(job_dir, secure_filename(csv_file.filename) or "products.csv")
-    csv_file.save(csv_path)
-
-    logo_path = ""
-    logo_file = request.files.get("logo")
-    if logo_file and logo_file.filename:
-        if not logo_file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            shutil.rmtree(job_dir, ignore_errors=True)
-            return jsonify(error="Logo must be a PNG, JPG or WEBP image."), 400
-        logo_path = os.path.join(job_dir, "logo" + os.path.splitext(logo_file.filename)[1].lower())
-        logo_file.save(logo_path)
-
-    # ---- 3. read the CSV now, so bad files fail instantly ------------
-    try:
-        items = load_products(csv_path, store_url)
-    except Exception as e:                        # noqa: BLE001
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error=f"Couldn't read that CSV: {e}"), 400
-
-    if not items:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error="No sellable products found. Each product row "
-                             "needs at least a title and a price."), 400
-    if len(items) > MAX_PRODUCTS:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error=f"That's {len(items)} products — the limit is "
-                             f"{MAX_PRODUCTS} per catalog."), 400
-
-    # ---- 4. the paywall (single tier: any valid key/payment = full access)
-    tier = key_tier(request.form.get("license_key", ""))
-    wall = paywall_on()
-    limit = free_limit()
-
-    premium_used = []
-    if section_names:
-        premium_used.append("category sections")
-    if layout != "12":
-        premium_used.append(f"{layout}-per-page layout")
-    if use_compare_at:
-        premium_used.append("compare-at prices")
-    if show_stock:
-        premium_used.append("stock counts")
-
-    # One purchase link now (checked in this order so old BASIC/PRO setups
-    # keep working without changes): PAY_LINK_PRO, then PAY_LINK_BASIC,
-    # then a plain PAY_LINK if you ever rename it.
-    pay_link = (os.environ.get("PAY_LINK_PRO", "").strip()
-               or os.environ.get("PAY_LINK_BASIC", "").strip()
-               or os.environ.get("PAY_LINK", "").strip())
-
-    if wall and limit and len(items) > limit and tier is None:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error=f"The free plan covers up to {limit} products and "
-                             f"your file has {len(items)}. Buy a license key for "
-                             "full access — payment takes under a minute and "
-                             "you'll be brought straight back here, unlocked "
-                             "automatically.",
-                       upgrade=True, pay_url=pay_link), 402
-
-    if wall and premium_used and tier is None:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return jsonify(error="These are premium features: "
-                             + ", ".join(premium_used)
-                             + ". Buy a license key for full access — payment "
-                               "takes under a minute and you'll be brought "
-                               "straight back here, unlocked automatically.",
-                       upgrade=True, pay_url=pay_link), 402
-
-    # Free catalogs carry a small clickable footer back to this site -
-    # every shared PDF advertises you. Any paying customer gets clean PDFs.
-    if tier is None:
-        branding_text = os.environ.get(
-            "BRAND_TEXT", "Made with CatalogPress · catalog-from-shopify.onrender.com")
-        branding_url = os.environ.get(
-            "BRAND_URL", "https://catalog-from-shopify.onrender.com")
-    else:
-        branding_text = branding_url = ""
-
-    # ---- 5. start the background job and reply straight away ---------
-    with JOBS_LOCK:
-        JOBS[job_id] = {"status": "working", "percent": 1,
-                        "message": "Starting…", "result": None,
-                        "download_name": None, "created": time.time()}
-
-    options = {"business_name": business_name, "discounts": discounts,
-               "currency": currency, "logo_path": logo_path,
-               "layout": layout, "section_names": section_names,
-               "use_compare_at": use_compare_at, "show_stock": show_stock,
-               "branding_text": branding_text, "branding_url": branding_url}
-    threading.Thread(target=run_job, args=(job_id, items, job_dir, options),
-                     daemon=True).start()
-
-    return jsonify(job_id=job_id, products=len(items), variants=len(discounts))
-
-
-@app.route("/status/<job_id>")
-def status(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify(status="unknown",
-                           message="Job not found (it may have expired)."), 404
-        return jsonify(status=job["status"], percent=job["percent"],
-                       message=job["message"],
-                       download_name=job["download_name"])
-
-
-@app.route("/download/<job_id>")
-def download(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    if not job or job["status"] != "done" or not job["result"]:
-        return "This download isn't ready or has expired.", 404
-    return send_file(job["result"], as_attachment=True,
-                     download_name=job["download_name"])
-
-
-if __name__ == "__main__":
-    # Local testing only. In the cloud, gunicorn runs the app instead
-    # (see the Start Command in README.md).
-    app.run(debug=True, port=5000)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CatalogPress — PDF catalogs from your Shopify export</title>
+<meta name="description" content="Upload your Shopify product export and download a designed, clickable PDF catalog in minutes — with discount price tiers for wholesale and trade customers.">
+
+<!-- Fonts: characterful display + calm body + mono for price-tag details -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --paper:#F4F4F1;
+  --card:#FFFFFF;
+  --ink:#1A1F29;
+  --ink-soft:#3A404D;
+  --muted:#6A7080;
+  --line:#D9D9DF;
+  --brass:#D9A626;
+  --brass-dark:#B5871A;
+  --ok:#1D7A46;
+  --bad:#B3372B;
+  --radius:14px;
+  --shadow:0 1px 2px rgba(26,31,41,.06), 0 10px 30px -12px rgba(26,31,41,.18);
+  --font-display:"Bricolage Grotesque", Georgia, serif;
+  --font-body:"Instrument Sans", -apple-system, "Segoe UI", sans-serif;
+  --font-mono:"IBM Plex Mono", ui-monospace, monospace;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--font-body);
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+img{max-width:100%}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--brass); outline-offset:2px; border-radius:4px}
+
+.wrap{max-width:1060px; margin:0 auto; padding:0 22px}
+
+.topbar{background:var(--ink); color:#fff}
+.topbar .wrap{display:flex; align-items:center; justify-content:space-between; height:60px}
+.brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:800; font-size:1.1rem; letter-spacing:.2px; text-decoration:none}
+.brand-mark{width:26px; height:26px; border-radius:7px; background:var(--brass); display:grid; place-items:center; color:var(--ink); font-family:var(--font-mono); font-size:.8rem}
+.topbar nav a{color:#E7E9EE; text-decoration:none; font-size:.92rem; margin-left:22px}
+.topbar nav a:hover{color:#fff; text-decoration:underline; text-underline-offset:4px}
+
+.hero{padding:64px 0 40px}
+.hero .wrap{display:grid; grid-template-columns:1.15fr .85fr; gap:48px; align-items:center}
+.kicker{font-family:var(--font-mono); font-size:.78rem; letter-spacing:.14em; text-transform:uppercase; color:var(--brass-dark)}
+h1{font-family:var(--font-display); font-weight:800; font-size:clamp(2.1rem,4.6vw,3.3rem); line-height:1.06; letter-spacing:-.5px; margin:14px 0 18px}
+h1 .under{box-shadow:inset 0 -0.28em 0 rgba(217,166,38,.45)}
+.lede{color:var(--ink-soft); font-size:1.08rem; max-width:46ch}
+.hero-cta{margin-top:26px; display:flex; gap:14px; align-items:center; flex-wrap:wrap}
+.btn{
+  display:inline-block; border:0; cursor:pointer; text-decoration:none;
+  font-family:var(--font-body); font-weight:600; font-size:1rem;
+  padding:14px 26px; border-radius:10px;
+  background:var(--ink); color:#fff;
+  transition:transform .12s ease, background .12s ease;
+}
+.btn:hover{background:#0F1620; transform:translateY(-1px)}
+.btn.brass{background:var(--brass); color:var(--ink)}
+.btn.brass:hover{background:var(--brass-dark); color:#fff}
+.btn[disabled]{opacity:.55; cursor:not-allowed; transform:none}
+.hero-note{font-size:.9rem; color:var(--muted)}
+
+.steps{margin-top:38px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
+.step{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
+.step b{display:block; font-family:var(--font-mono); font-size:.72rem; letter-spacing:.12em; color:var(--brass-dark); margin-bottom:6px}
+.step span{font-size:.9rem; color:var(--ink-soft)}
+
+.stage{position:relative; display:grid; place-items:center; padding:10px 0}
+.sheet{position:absolute; inset:8% 6% 4% 10%; background:#fff; border:1px solid var(--line); border-radius:16px; transform:rotate(-3deg)}
+.sheet.two{inset:5% 10% 7% 4%; transform:rotate(2.4deg)}
+.mockcard{
+  position:relative; width:250px; background:var(--card);
+  border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow);
+  padding:16px; text-align:center;
+}
+.mockcard .photo{height:150px; border-radius:10px; background:
+  radial-gradient(120px 90px at 60% 30%, #FBF3DC, transparent 70%),
+  linear-gradient(160deg,#EEF0F4,#E2E5EB); display:grid; place-items:center; overflow:hidden}
+.book{width:86px; height:112px; border-radius:4px 10px 10px 4px;
+  background:linear-gradient(105deg,#233047 55%, #2C3B57 55%);
+  border-left:7px solid var(--brass); box-shadow:0 12px 18px -10px rgba(26,31,41,.5);
+  display:grid; place-items:center}
+.book i{font-style:normal; color:var(--brass); font-family:var(--font-mono); font-size:.6rem; letter-spacing:.2em; writing-mode:vertical-rl; transform:rotate(180deg)}
+.mockcard h4{font-size:.92rem; margin:12px 4px 8px; line-height:1.3}
+.mock-old{font-size:.82rem; color:var(--muted); text-decoration:line-through; min-height:1.2em; visibility:hidden}
+.mock-old.show{visibility:visible}
+.mock-badge{display:inline-block; margin-top:4px; background:var(--ink); color:#fff; font-weight:600; padding:7px 16px; border-radius:9px; font-size:1rem; min-width:96px}
+.mock-tag{position:absolute; top:-13px; right:-13px; background:var(--brass); color:var(--ink);
+  font-family:var(--font-mono); font-size:.72rem; font-weight:500; padding:6px 10px; border-radius:999px;
+  box-shadow:var(--shadow); transform:rotate(6deg); opacity:0; transition:opacity .3s}
+.mock-tag.show{opacity:1}
+.mock-sku{display:inline-block; margin-top:10px; font-family:var(--font-mono); font-size:.66rem; color:var(--ink-soft);
+  background:#EEEEF2; border:1px solid var(--line); padding:4px 10px; border-radius:999px}
+.stage-caption{position:absolute; bottom:-6px; font-family:var(--font-mono); font-size:.7rem; color:var(--muted); letter-spacing:.08em}
+
+.tool{padding:34px 0 26px}
+.tool-card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden}
+.tool-head{background:var(--ink); color:#fff; padding:18px 26px; display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap}
+.tool-head h2{font-family:var(--font-display); font-weight:600; font-size:1.25rem}
+.tool-head span{font-family:var(--font-mono); font-size:.72rem; color:var(--brass); letter-spacing:.1em}
+.tool-body{padding:26px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+.field{margin-bottom:18px}
+label{display:block; font-weight:600; font-size:.92rem; margin-bottom:6px}
+label small{font-weight:400; color:var(--muted)}
+input[type=text], select{
+  width:100%; padding:12px 14px; border:1.5px solid var(--line); border-radius:9px;
+  font:inherit; background:#FBFBFC; color:var(--ink);
+}
+input[type=text]:focus, select:focus{border-color:var(--ink); outline:none; background:#fff}
+.hint{font-size:.82rem; color:var(--muted); margin-top:5px}
+
+.pro{display:inline-block; background:var(--brass); color:var(--ink);
+  font-family:var(--font-mono); font-size:.6rem; font-weight:500; letter-spacing:.08em;
+  padding:2px 8px; border-radius:999px; vertical-align:2px; margin-left:6px}
+.checkline{display:flex; align-items:center; gap:10px; padding:13px 14px;
+  border:1.5px solid var(--line); border-radius:9px; background:#FBFBFC; cursor:pointer}
+.checkline input{width:18px; height:18px; accent-color:var(--brass); cursor:pointer; flex-shrink:0}
+.checkline span{font-size:.92rem; font-weight:600}
+.checkline small{display:block; font-weight:400; font-size:.8rem; color:var(--muted)}
+
+.buy-banner{display:none; align-items:center; gap:10px; margin-top:8px; padding:14px 16px;
+  background:#FDF6E3; border:1.5px solid var(--brass); border-radius:10px;
+  font-size:1rem; color:var(--ink); line-height:1.5}
+.buy-banner.show{display:flex}
+.buy-banner .icon{font-size:1.3rem; flex-shrink:0}
+.buy-banner a{font-weight:700; color:var(--brass-dark); text-decoration:underline; text-underline-offset:3px}
+.buy-banner a:hover{color:var(--ink)}
+
+.drop{
+  border:2px dashed var(--line); border-radius:12px; background:#FBFBFC;
+  padding:26px; text-align:center; cursor:pointer; transition:border-color .15s, background .15s;
+}
+.drop:hover, .drop.drag{border-color:var(--brass); background:#FDF9EE}
+.drop strong{display:block; margin-bottom:4px}
+.drop .filename{font-family:var(--font-mono); font-size:.8rem; color:var(--ok); margin-top:8px; word-break:break-all}
+.drop input{display:none}
+
+.tool-actions{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-top:6px}
+
+.progress{display:none; margin-top:22px}
+.progress.show{display:block}
+.bar{height:12px; background:#E9E9EE; border-radius:999px; overflow:hidden; border:1px solid var(--line)}
+.bar i{display:block; height:100%; width:2%; background:linear-gradient(90deg,var(--brass),var(--brass-dark)); transition:width .5s ease}
+.progress p{margin-top:8px; font-family:var(--font-mono); font-size:.78rem; color:var(--ink-soft)}
+.result{display:none; margin-top:22px; background:#F2F8F3; border:1px solid #CBE3D2; border-radius:12px; padding:18px 20px}
+.result.show{display:block}
+.result h3{font-family:var(--font-display); font-size:1.1rem; margin-bottom:4px}
+.result p{font-size:.9rem; color:var(--ink-soft); margin-bottom:14px}
+.error{display:none; margin-top:18px; background:#FBF1EF; border:1px solid #E7C4BD; color:var(--bad); border-radius:12px; padding:14px 18px; font-size:.92rem}
+.error.show{display:block}
+
+.notes{padding:36px 0 56px}
+.notes h2{font-family:var(--font-display); font-weight:600; font-size:1.4rem; margin-bottom:18px}
+.notes-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+.note{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px}
+.note h3{font-size:.98rem; margin-bottom:6px}
+.note p{font-size:.88rem; color:var(--ink-soft)}
+
+footer{background:var(--ink); color:#B9BEC9; padding:26px 0; font-size:.85rem}
+footer .wrap{display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap}
+footer b{color:#fff}
+
+@media (max-width:860px){
+  .hero .wrap{grid-template-columns:1fr; gap:40px}
+  .stage{order:-1; min-height:340px}
+  .steps{grid-template-columns:1fr}
+  .grid2{grid-template-columns:1fr}
+  .notes-grid{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  .btn:hover{transform:none}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#"><span class="brand-mark">¶</span> CatalogPress</a>
+    <nav>
+      <a href="#generate">Make a catalog</a>
+      <a href="#how">How it works</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <p class="kicker">For Shopify stores</p>
+      <h1>Your Shopify export, back as a <span class="under">clickable PDF catalog</span> — in minutes.</h1>
+      <p class="lede">Upload the product CSV Shopify already gives you. Get back a designed
+        catalog with photos, prices and SKUs — every card linking straight to your store.
+        Need trade pricing? Type <em>0, 10, 20</em> and you'll get three versions
+        with the discount already applied. Premium unlocks category sections,
+        compact layouts, compare-at pricing and stock counts.</p>
+      <div class="hero-cta">
+        <a class="btn brass" href="#generate">Make my catalog</a>
+        <span class="hero-note">No signup · your file is deleted after 2 hours</span>
+      </div>
+
+      <div class="steps" id="how">
+        <div class="step"><b>STEP 1</b><span>In Shopify admin: Products → Export → CSV.</span></div>
+        <div class="step"><b>STEP 2</b><span>Upload it here and pick your discount levels.</span></div>
+        <div class="step"><b>STEP 3</b><span>Download the PDFs and send them to customers.</span></div>
+      </div>
+    </div>
+
+    <div class="stage" aria-hidden="true">
+      <div class="sheet"></div>
+      <div class="sheet two"></div>
+      <div class="mockcard">
+        <span class="mock-tag" id="mockTag">−10%</span>
+        <div class="photo"><div class="book"><i>TAFSIR</i></div></div>
+        <h4>Tafsir Ibn Kathir — 10 Volume Set (English)</h4>
+        <p class="mock-old" id="mockOld">£124.99</p>
+        <span class="mock-badge" id="mockBadge">£124.99</span><br>
+        <span class="mock-sku">SKU DS-1042 · 18 in stock</span>
+      </div>
+      <span class="stage-caption">ONE CARD · THREE PRICE LISTS</span>
+    </div>
+  </div>
+</section>
+
+<section class="tool" id="generate">
+  <div class="wrap">
+    <div class="tool-card">
+      <div class="tool-head">
+        <h2>Make your catalog</h2>
+        <span>CSV IN → PDF OUT</span>
+      </div>
+      <div class="tool-body">
+        <div class="result" id="keyBanner" style="margin-top:0;margin-bottom:20px">
+          <h3>Payment confirmed ✔</h3>
+          <p id="keyBannerMsg">Your license is active and saved on this device — generate away!</p>
+        </div>
+        <form id="genForm">
+
+          <div class="field">
+            <label for="csvInput">Shopify product export <small>(.csv)</small></label>
+            <div class="drop" id="dropZone" tabindex="0" role="button"
+                 aria-label="Choose or drop your Shopify CSV export">
+              <strong>Drop your CSV here, or click to choose</strong>
+              <span class="hint">Shopify admin → Products → Export → “Plain CSV file”</span>
+              <div class="filename" id="csvName"></div>
+              <input type="file" id="csvInput" name="csv" accept=".csv">
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label for="bizName">Business name</label>
+              <input type="text" id="bizName" name="business_name" maxlength="60"
+                     placeholder="Your Business Name" required>
+              <p class="hint">Shown on the cover and page headers.</p>
+            </div>
+            <div class="field">
+              <label for="storeUrl">Store URL <small>(makes every card clickable)</small></label>
+              <input type="text" id="storeUrl" name="store_url" placeholder="https://Your Website Link">
+              <p class="hint">Leave empty if you don't want links.</p>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label for="discounts">Discount versions <small>(%)</small></label>
+              <input type="text" id="discounts" name="discounts" value="" placeholder="e.g. 0, 10, 20">
+              <p class="hint">One PDF per number. “0” = full-price version. Old prices show crossed out. Leave blank for a single full-price catalog.</p>
+            </div>
+            <div class="field">
+              <label for="currency">Currency</label>
+              <select id="currency" name="currency">
+                <option value="£" selected>£ — British Pound</option>
+                <option value="$">$ — US Dollar</option>
+                <option value="€">€ — Euro</option>
+                <option value="SAR ">SAR — Saudi Riyal</option>
+                <option value="AED ">AED — UAE Dirham</option>
+                <option value="Rs ">Rs — Pakistani Rupee</option>
+                <option value="Rp ">Rp — Indonesian Rupiah</option>
+                <option value="RM ">RM — Malaysian Ringgit</option>
+                <option value="BDT ">BDT — Bangladeshi Taka</option>
+                <option value="TL ">TL — Turkish Lira</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label for="sections">Category sections <span class="pro">PRO</span></label>
+              <input type="text" id="sections" name="sections" placeholder="e.g. Seerah, Quran, Kids">
+              <p class="hint">Write your own categories — e.g. <em>Seerah, Quran, Kids</em>. Each one
+                 becomes its own chapter with a divider page, and only products tagged with that
+                 name appear under it. Anything that doesn't match goes in a final
+                 “More Products” chapter. Leave blank for no chapters.</p>
+            </div>
+            <div class="field">
+              <label for="layout">Products per page</label>
+              <select id="layout" name="layout">
+                <option value="12" selected>12 — Standard</option>
+                <option value="30">30 — Dense price list (PRO)</option>
+              </select>
+              <p class="hint">Compact layouts fit big ranges into fewer pages.</p>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="checkline" for="showStock">
+              <input type="checkbox" id="showStock" name="show_stock">
+              <span>Show stock counts <span class="pro">PRO</span>
+                <small>Adds “12 in stock” to each card — only appears where your Shopify export includes inventory numbers.</small></span>
+            </label>
+          </div>
+
+          <div class="grid2">
+            <div class="field">
+              <label for="logoInput">Logo <small>(optional, PNG or JPG)</small></label>
+              <input type="file" id="logoInput" name="logo" accept=".png,.jpg,.jpeg,.webp"
+                     style="font-size:.9rem">
+            </div>
+            <div class="field">
+              <label for="licenseKey">License key <small>(filled automatically after payment)</small></label>
+              <input type="text" id="licenseKey" name="license_key" placeholder="Appears here after you pay">
+              <p class="hint">Filled in automatically the moment you pay.</p>
+              <div class="buy-banner" id="buyBanner">
+                <span class="icon">🔓</span>
+                <span id="buyBannerText"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="tool-actions">
+            <button class="btn brass" type="submit" id="goBtn">Generate my catalog</button>
+            <span class="hint" id="countHint"></span>
+          </div>
+
+          <div class="error" id="errorBox" role="alert"></div>
+          <a class="btn brass" id="payBtn" href="#" target="_blank" rel="noopener"
+             style="display:none;margin-top:14px">Unlock now →</a>
+
+          <div class="progress" id="progressBox" aria-live="polite">
+            <div class="bar"><i id="barFill"></i></div>
+            <p id="progressMsg">Starting…</p>
+          </div>
+
+          <div class="result" id="resultBox">
+            <h3>Your catalog is ready ✔</h3>
+            <p id="resultMsg"></p>
+            <a class="btn" id="downloadBtn" href="#">Download</a>
+            <button class="btn" type="button" id="againBtn"
+                    style="background:#fff;color:var(--ink);border:1.5px solid var(--line)">
+              Make another
+            </button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="notes">
+  <div class="wrap">
+    <h2>Good to know</h2>
+    <div class="notes-grid">
+      <div class="note">
+        <h3>What ends up on each card?</h3>
+        <p>Product photo, title, SKU and a price badge — every card linking to
+           your store. Discount versions show the old price crossed out.</p>
+      </div>
+      <div class="note">
+        <h3>What does Premium add?</h3>
+        <p>Category divider pages built from your Shopify tags, compact 20 or
+           30-per-page layouts, crossed-out compare-at prices, and stock
+           counts on every card.</p>
+      </div>
+      <div class="note">
+        <h3>Is my data stored?</h3>
+        <p>Only long enough to build your PDF. Uploads and finished files are
+           deleted automatically within two hours.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span><b>CatalogPress</b> — PDF catalogs from your Shopify export.</span>
+    <span>Questions? hello@yourdomain.com</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  const badge = document.getElementById('mockBadge');
+  const old   = document.getElementById('mockOld');
+  const tag   = document.getElementById('mockTag');
+  const base  = 124.99;
+  const tiers = [0, 10, 20];
+  let i = 0;
+
+  function show(discount) {
+    const price = (base * (1 - discount / 100)).toFixed(2);
+    badge.textContent = '£' + price;
+    old.classList.toggle('show', discount > 0);
+    tag.classList.toggle('show', discount > 0);
+    tag.textContent = '−' + discount + '%';
+  }
+
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    show(20);
+  } else {
+    show(0);
+    setInterval(() => { i = (i + 1) % tiers.length; show(tiers[i]); }, 2400);
+  }
+})();
+
+const dropZone = document.getElementById('dropZone');
+const csvInput = document.getElementById('csvInput');
+const csvName  = document.getElementById('csvName');
+
+dropZone.addEventListener('click', () => csvInput.click());
+dropZone.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); csvInput.click(); }
+});
+['dragover', 'dragenter'].forEach(ev =>
+  dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev =>
+  dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove('drag'); }));
+dropZone.addEventListener('drop', e => {
+  if (e.dataTransfer.files.length) { csvInput.files = e.dataTransfer.files; showFileName(); }
+});
+csvInput.addEventListener('change', showFileName);
+function showFileName() {
+  csvName.textContent = csvInput.files.length ? '✔ ' + csvInput.files[0].name : '';
+}
+
+const form        = document.getElementById('genForm');
+const goBtn       = document.getElementById('goBtn');
+const errorBox    = document.getElementById('errorBox');
+const progressBox = document.getElementById('progressBox');
+const barFill     = document.getElementById('barFill');
+const progressMsg = document.getElementById('progressMsg');
+const resultBox   = document.getElementById('resultBox');
+const resultMsg   = document.getElementById('resultMsg');
+const downloadBtn = document.getElementById('downloadBtn');
+const countHint   = document.getElementById('countHint');
+const payBtn      = document.getElementById('payBtn');
+const licenseKey  = document.getElementById('licenseKey');
+let pollTimer = null;
+
+function showError(msg, payUrl) {
+  errorBox.textContent = msg;
+  errorBox.classList.add('show');
+  progressBox.classList.remove('show');
+  if (payUrl) { payBtn.href = payUrl; payBtn.style.display = 'inline-block'; }
+  else { payBtn.style.display = 'none'; }
+  goBtn.disabled = false;
+}
+function resetUI() {
+  clearInterval(pollTimer);
+  errorBox.classList.remove('show');
+  payBtn.style.display = 'none';
+  progressBox.classList.remove('show');
+  resultBox.classList.remove('show');
+  countHint.textContent = '';
+  barFill.style.width = '2%';
+  goBtn.disabled = false;
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  resetUI();
+
+  if (!csvInput.files.length) { showError('Please choose your Shopify CSV export first.'); return; }
+
+  goBtn.disabled = true;
+  progressBox.classList.add('show');
+  progressMsg.textContent = 'Uploading your file…';
+
+  try {
+    const resp = await fetch('/generate', { method: 'POST', body: new FormData(form) });
+    const data = await resp.json();
+    if (!resp.ok) { showError(data.error || 'Something went wrong.', data.pay_url); return; }
+
+    countHint.textContent =
+      `Found ${data.products} products — building ${data.variants} catalog version${data.variants > 1 ? 's' : ''}.`;
+    poll(data.job_id);
+  } catch (err) {
+    showError('Could not reach the server. Check your connection and try again.');
+  }
+});
+
+function poll(jobId) {
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/status/' + jobId);
+      const data = await resp.json();
+
+      if (data.status === 'working') {
+        barFill.style.width = Math.max(2, data.percent) + '%';
+        if (data.message) progressMsg.textContent = data.message + '…';
+      } else if (data.status === 'done') {
+        clearInterval(pollTimer);
+        barFill.style.width = '100%';
+        progressBox.classList.remove('show');
+        resultMsg.textContent = data.download_name.endsWith('.zip')
+          ? 'All versions are bundled in one ZIP — unzip it to find a PDF per discount level.'
+          : 'One PDF, ready to send to your customers.';
+        downloadBtn.href = '/download/' + jobId;
+        downloadBtn.textContent = 'Download ' + data.download_name;
+        resultBox.classList.add('show');
+        goBtn.disabled = false;
+      } else {
+        clearInterval(pollTimer);
+        showError(data.message || 'The job failed. Please try again.');
+      }
+    } catch (err) { /* one missed poll is fine — try again next tick */ }
+  }, 1500);
+}
+
+document.getElementById('againBtn').addEventListener('click', () => {
+  resetUI();
+  csvInput.value = '';
+  csvName.textContent = '';
+  window.scrollTo({ top: document.getElementById('generate').offsetTop - 20, behavior: 'smooth' });
+});
+
+(function () {
+  const banner = document.getElementById('keyBanner');
+  const params = new URLSearchParams(window.location.search);
+  const fromStripe = params.get('key');
+
+  if (fromStripe) {
+    licenseKey.value = fromStripe;
+    try { localStorage.setItem('cp_license', fromStripe); } catch (e) {}
+    banner.classList.add('show');
+    document.getElementById('generate').scrollIntoView();
+    history.replaceState({}, '', '/');
+  } else {
+    try {
+      const saved = localStorage.getItem('cp_license');
+      if (saved) licenseKey.value = saved;
+    } catch (e) {}
+  }
+
+  licenseKey.addEventListener('change', () => {
+    try { localStorage.setItem('cp_license', licenseKey.value.trim()); } catch (e) {}
+  });
+
+  fetch('/pricing').then(r => r.json()).then(p => {
+    if (p.buy) {
+      document.getElementById('buyBannerText').innerHTML =
+        `Need full features? <a href="${p.buy}" target="_blank" rel="noopener">Buy a license key here</a> ` +
+        `— pay in under a minute and you'll be brought straight back, unlocked automatically.`;
+      document.getElementById('buyBanner').classList.add('show');
+    }
+  }).catch(() => {});
+})();
+</script>
+</body>
+</html>
