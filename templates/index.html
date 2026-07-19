@@ -560,7 +560,7 @@ document.getElementById('againBtn').addEventListener('click', () => {
     try { localStorage.setItem('cp_license', licenseKey.value.trim()); } catch (e) {}
   });
 
-   fetch('/pricing').then(r => r.json()).then(p => {
+  fetch('/pricing').then(r => r.json()).then(p => {
     if (p.buy) {
       document.getElementById('buyBannerText').innerHTML =
         `Need full features? <a href="${p.buy}" target="_blank" rel="noopener">Buy a license key here</a> ` +
@@ -568,6 +568,7 @@ document.getElementById('againBtn').addEventListener('click', () => {
       document.getElementById('buyBanner').classList.add('show');
     }
   }).catch(() => {});
+})();
 </script>
 </body>
 </html>
